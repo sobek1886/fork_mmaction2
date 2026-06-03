@@ -141,6 +141,7 @@ def _preprocess_worker(args):
 def load_backbone(checkpoint_path, device):
     """Build MViTv2-S backbone and load weights from Logos checkpoint."""
     from mmaction.registry import MODELS
+    import mmaction.models  # noqa: F401 — triggers @MODELS.register_module() decorators
 
     backbone = MODELS.build(dict(
         type='MViT',
