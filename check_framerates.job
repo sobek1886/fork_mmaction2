@@ -1,0 +1,31 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=check_fps
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --time=00:05:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_check_fps_%A.txt
+
+module purge
+module load 2025
+
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+python - <<'EOF'
+import cv2, glob, os
+
+for pattern, label in [
+    ("/scratch-shared/psobecki/piotrAnims/mkv/*.mkv", "piotrAnims"),
+    ("/scratch-shared/psobecki/BushuisMP4/*.MP4",     "Bushuis"),
+]:
+    files = sorted(glob.glob(pattern))[:3]
+    for f in files:
+        cap = cv2.VideoCapture(f)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        n   = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        cap.release()
+        print(f"{label}  fps={fps}  frames={n:.0f}  file={os.path.basename(f)}")
+EOF

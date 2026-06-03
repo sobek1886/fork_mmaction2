@@ -32,14 +32,16 @@ import torch
 from tqdm import tqdm
 
 
-# ── Preprocessing constants (from Logos val_pipeline) ────────────────────────
+# ── Preprocessing constants ───────────────────────────────────────────────────
 CLIP_LEN       = 32    # frames fed to MViTv2-S
 FRAME_INTERVAL = 2     # sample every 2nd frame → each clip spans 64 consecutive frames
 CLIP_STRIDE    = 32    # non-overlapping clips
-RESIZE         = 300   # resize short side to this
-INPUT_SIZE     = 224   # final spatial crop
+INPUT_SIZE     = 224   # spatial size expected by MViTv2-S
 MEAN = np.array([140.99762122, 129.92701646, 125.25081198], dtype=np.float32)
 STD  = np.array([62.07248248,  62.94645644,  61.42221137],  dtype=np.float32)
+
+# HSV thresholds for green-screen background removal (palmer / digits renders)
+_GS_H_LO, _GS_H_HI, _GS_S_MIN = 45, 85, 80
 
 
 # ── Preprocessing (CPU, runs in worker processes) ─────────────────────────────
@@ -79,25 +81,33 @@ def _preprocess_worker(args):
         import cv2
         T = len(frames)
 
+        # Detect non-green-screen bounding box from a sample of frames,
+        # then derive a consistent square crop for the whole sequence.
+        sample_idx = np.linspace(0, T - 1, min(10, T), dtype=int)
+        H, W = frames[0].shape[:2]
+        content_mask = np.zeros((H, W), dtype=np.uint8)
+        for i in sample_idx:
+            hsv = cv2.cvtColor(frames[i], cv2.COLOR_RGB2HSV)
+            is_green = ((hsv[:, :, 0] >= _GS_H_LO) & (hsv[:, :, 0] <= _GS_H_HI) &
+                        (hsv[:, :, 1] >= _GS_S_MIN)).astype(np.uint8)
+            np.maximum(content_mask, 1 - is_green, out=content_mask)
+        coords = cv2.findNonZero(content_mask)
+        if coords is not None:
+            bx, by, bw, bh = cv2.boundingRect(coords)
+            sq = min(max(bw, bh) + 40, W, H)   # square side with 20 px margin each side
+            cx, cy = bx + bw // 2, by + bh // 2
+            sx = int(np.clip(cx - sq // 2, 0, W - sq))
+            sy = int(np.clip(cy - sq // 2, 0, H - sq))
+        else:
+            sq = min(W, H)
+            sx, sy = (W - sq) // 2, (H - sq) // 2
+
+        # Crop square then resize to INPUT_SIZE × INPUT_SIZE → normalise
         processed = []
         for frame in frames:
-            h, w = frame.shape[:2]
-            scale = RESIZE / min(h, w)
-            nh, nw = int(round(h * scale)), int(round(w * scale))
-            frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
-            # Square-pad to RESIZE × RESIZE
-            pad_h = max(0, RESIZE - nh)
-            pad_w = max(0, RESIZE - nw)
-            frame = np.pad(frame,
-                           ((pad_h // 2, pad_h - pad_h // 2),
-                            (pad_w // 2, pad_w - pad_w // 2),
-                            (0, 0)),
-                           mode='constant')
-            # Center crop to INPUT_SIZE × INPUT_SIZE
-            y0 = (frame.shape[0] - INPUT_SIZE) // 2
-            x0 = (frame.shape[1] - INPUT_SIZE) // 2
-            frame = frame[y0:y0 + INPUT_SIZE, x0:x0 + INPUT_SIZE]
-            # Normalise
+            frame = frame[sy:sy + sq, sx:sx + sq]
+            frame = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE),
+                               interpolation=cv2.INTER_LINEAR)
             frame = (frame.astype(np.float32) - MEAN) / STD   # (H, W, 3)
             processed.append(frame.transpose(2, 0, 1))         # (3, H, W)
 

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=logos_wlasl
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=5
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_logos_wlasl_%A.txt
+
+module purge
+module load 2025
+
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+srun python extract_logos_features_wlasl.py \
+    --wlasl_dir   /scratch-shared/psobecki/wlasl100 \
+    --output_dir  /scratch-shared/psobecki/wlasl100/logos_features \
+    --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
+    --workers 5 \
+    --batch_size 8 \
+#--overwrite

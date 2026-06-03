@@ -1,0 +1,20 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=crop_piotr
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_crop_piotr_%A.txt
+
+module purge
+module load 2025
+
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+python $HOME/fork_mmaction2/crop_piotr_videos.py \
+    --input_dir   /scratch-shared/psobecki/piotrAnims/mkv \
+    --output_dir  /scratch-shared/psobecki/piotrAnims/mkv_cropped \
+    --workers     8
