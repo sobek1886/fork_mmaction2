@@ -1,22 +1,22 @@
-"""Extract MViTv2-S features from augmented ASL-Citizen videos.
+"""Extract MViTv2-S features from augmented ASL-Citizen frame sequences.
 
-Handles the nested structure produced by the SkyPilot augmentation pipeline:
-  augmented_videos/{video_id}/{aug_name}.mp4
-  e.g. augmented_videos/7410564482917914-CRACK/glasses.mp4
+Handles the nested structure of pre-extracted JPEG frame directories:
+  augmented_frames/{video_id}-{WORD}/{aug_name}/0000.jpg ...
+  e.g. augmented_frames/4758969817179144-MARCH/glasses/0000.jpg
 
 Output feature naming:
   asl_citizen_{video_id}_{aug_name}.npy
-  e.g. asl_citizen_7410564482917914-CRACK_glasses.npy
+  e.g. asl_citizen_4758969817179144-MARCH_glasses.npy
 
 This matches what SignCLIPVideoCSVMetaProcessor expects when train.csv contains:
-  Video file = 7410564482917914-CRACK_glasses.mp4
+  Video file = 4758969817179144-MARCH_glasses.mp4
 
 Must be run in the logos conda environment with mmaction2 installed.
 Run from the mmaction2 directory where the Logos fork has been applied.
 
 Usage:
     python extract_logos_features_asl_citizen_aug.py \\
-        --aug_dir     /scratch-shared/psobecki/asl_citizen/augmented_videos \\
+        --aug_dir     /scratch-shared/psobecki/ASL_Citizen/augmented_frames \\
         --output_dir  /home/psobecki/ASL_Citizen/logos_features \\
         --checkpoint  data/model/logos_autsl_wlasl_model.pth
 """
@@ -43,21 +43,21 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
 
 def _preprocess_worker(args):
-    vpath, out_path, overwrite = args
+    frame_dir, out_path, overwrite = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
 
     try:
         import cv2
-        cap = cv2.VideoCapture(vpath)
+        from pathlib import Path as _Path
+        frame_paths = sorted(_Path(frame_dir).glob('*.jpg'))
         frames = []
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
+        for fp in frame_paths:
+            frame = cv2.imread(str(fp))
+            if frame is None:
+                continue
             frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        cap.release()
         if not frames:
             return out_path, None, 'error: no frames decoded'
     except Exception as e:
@@ -140,26 +140,28 @@ def gpu_inference(backbone, clips_np, device, batch_size):
 
 
 def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool):
-    """augmented_videos/{video_id}/{aug_name}.mp4 → asl_citizen_{video_id}_{aug_name}.npy"""
+    """augmented_frames/{video_id}/{aug_name}/*.jpg → asl_citizen_{video_id}_{aug_name}.npy"""
     work = []
     for video_id_dir in sorted(aug_dir.iterdir()):
         if not video_id_dir.is_dir():
             continue
         video_id = video_id_dir.name
-        for vpath in sorted(video_id_dir.iterdir()):
-            if vpath.suffix.lower() not in VIDEO_EXTENSIONS:
+        for aug_dir_entry in sorted(video_id_dir.iterdir()):
+            if not aug_dir_entry.is_dir():
                 continue
-            aug_name = vpath.stem   # e.g. "glasses"
+            if not any(aug_dir_entry.glob('*.jpg')):
+                continue
+            aug_name = aug_dir_entry.name   # e.g. "glasses"
             key = f'asl_citizen_{video_id}_{aug_name}'
             out_path = output_dir / f'{key}.npy'
-            work.append((str(vpath), str(out_path), overwrite))
+            work.append((str(aug_dir_entry), str(out_path), overwrite))
     return work
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--aug_dir', required=True,
-                        help='augmented_videos/ directory (contains {video_id}/{aug_name}.mp4)')
+                        help='augmented_frames/ directory (contains {video_id}/{aug_name}/*.jpg)')
     parser.add_argument('--output_dir', required=True,
                         help='Where to write asl_citizen_*.npy feature files')
     parser.add_argument('--checkpoint', required=True)
@@ -181,7 +183,7 @@ def main():
     backbone = load_backbone(args.checkpoint, device)
 
     work = build_work_list(aug_dir, output_dir, args.overwrite)
-    print(f'Found {len(work)} augmented videos to process')
+    print(f'Found {len(work)} augmented frame sequences to process')
 
     skipped = errors = done = 0
     pending_clips = []
