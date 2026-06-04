@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ngt_k_runs
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=5
+#SBATCH --time=04:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_ngt_k_runs_%x_%A.txt
+
+# Usage:
+#   sbatch --job-name=ngt_baseline --export=EXPERIMENT=ngt_baseline                     ngt_k_runs.job
+#   sbatch --job-name=ngt_app_inv  --export=EXPERIMENT=ngt_appearance_invariant          ngt_k_runs.job
+#   sbatch --job-name=ngt_unreal   --export=EXPERIMENT=ngt_unreal_baseline,USE_UNREAL=1  ngt_k_runs.job
+
+module purge
+module load 2025
+
+MMPT_DIR="$HOME/Fork_SignCLIP/examples/MMPT"
+cd "$MMPT_DIR"
+source .venv/bin/activate
+export PYTHONPATH="$HOME/Fork_SignCLIP:$PYTHONPATH"
+export PATH="$MMPT_DIR/.venv/bin:$PATH"
+
+K=5
+EXPERIMENT=${EXPERIMENT:-ngt_baseline}
+BASE_DIR="/scratch-shared/psobecki/runs/retri_ngt"
+YAML_ORIG="projects/retri/signclip_ngt/${EXPERIMENT}.yaml"
+USE_UNREAL_FLAG=${USE_UNREAL:+--use_unreal}
+
+echo "Experiment : $EXPERIMENT  K=$K"
+
+for i in $(seq 1 $K); do
+    SEED=$((40 + i))
+    RUN_DIR="${BASE_DIR}/${EXPERIMENT}_run${i}"
+    YAML_TMP="/tmp/${EXPERIMENT}_run${i}_$$.yaml"
+
+    echo ""
+    echo "=== Run $i / $K  (seed=$SEED) ==="
+    rm -rf "$RUN_DIR"
+
+    # Patch YAML: update save_dir and seed, preserve all other settings
+    python - "$YAML_ORIG" "$YAML_TMP" "$RUN_DIR" "$SEED" <<'PYEOF'
+import sys, yaml
+src, dst, run_dir, seed = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+with open(src) as f:
+    cfg = yaml.safe_load(f)
+cfg['fairseq']['checkpoint']['save_dir'] = run_dir
+cfg['eval']['save_path'] = run_dir
+cfg['fairseq']['common']['seed'] = seed
+with open(dst, 'w') as f:
+    yaml.dump(cfg, f, default_flow_style=False)
+print(f"Patched: save_dir={run_dir}  seed={seed}")
+PYEOF
+
+    # Train
+    python locallaunch.py "$YAML_TMP" --jobtype local_single
+
+    # Eval — use original YAML for model architecture, run-specific checkpoint
+    python eval_ngt_retrieval.py \
+        --config      "$YAML_ORIG" \
+        --checkpoint  "${RUN_DIR}/checkpoint_last.pt" \
+        --manifest    /home/psobecki/ngt_pair_manifest.json \
+        --bushuis_dir /scratch-shared/psobecki/Bushuis/logos_features \
+        --output_json "${RUN_DIR}/eval_results.json" \
+        ${USE_UNREAL_FLAG}
+
+    rm -f "$YAML_TMP"
+done
+
+echo ""
+echo "=== All $K runs done. Aggregating ==="
+python "$HOME/fork_mmaction2/aggregate_ngt_results.py" \
+    --experiment "$EXPERIMENT" \
+    --base_dir   "$BASE_DIR" \
+    --k          $K
