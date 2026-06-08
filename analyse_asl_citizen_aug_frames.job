@@ -5,7 +5,7 @@
 #SBATCH --job-name=analyse_asl_aug_frames
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=00:15:00
+#SBATCH --time=00:30:00
 #SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_analyse_asl_aug_frames_%A.txt
 
 module purge
@@ -20,10 +20,12 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import cv2
 
+# ── augmented frame sequences ────────────────────────────────────────────────
 aug_root = Path('/scratch-shared/psobecki/ASL_Citizen/augmented_frames')
 
-counts = []
+aug_counts = []
 for video_dir in sorted(aug_root.iterdir()):
     if not video_dir.is_dir():
         continue
@@ -32,38 +34,72 @@ for video_dir in sorted(aug_root.iterdir()):
             continue
         n = len(list(aug_dir.glob('*.jpg')))
         if n > 0:
-            counts.append(n)
+            aug_counts.append(n)
 
-counts = np.array(counts)
-print(f'Sequences analysed : {len(counts)}')
-print(f'Min                : {counts.min()}')
-print(f'Max                : {counts.max()}')
-print(f'Mean               : {counts.mean():.1f}')
-print(f'Median             : {np.median(counts):.1f}')
-print(f'Std                : {counts.std():.1f}')
-print(f'Pct < 64 frames    : {(counts < 64).mean()*100:.1f}%  ({(counts < 64).sum()} seqs)')
-print(f'Pct < 32 frames    : {(counts < 32).mean()*100:.1f}%  ({(counts < 32).sum()} seqs)')
+aug_counts = np.array(aug_counts)
 
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+print('=== Augmented sequences ===')
+print(f'Sequences analysed : {len(aug_counts)}')
+print(f'Min                : {aug_counts.min()}')
+print(f'Max                : {aug_counts.max()}')
+print(f'Mean               : {aug_counts.mean():.1f}')
+print(f'Median             : {np.median(aug_counts):.1f}')
+print(f'Std                : {aug_counts.std():.1f}')
+print(f'Pct < 64 frames    : {(aug_counts < 64).mean()*100:.1f}%  ({(aug_counts < 64).sum()} seqs)')
+print(f'Pct < 32 frames    : {(aug_counts < 32).mean()*100:.1f}%  ({(aug_counts < 32).sum()} seqs)')
 
-axes[0].hist(counts, bins=60, color='steelblue', edgecolor='white', linewidth=0.4)
-axes[0].axvline(counts.mean(),   color='red',    linestyle='--', label=f'mean {counts.mean():.0f}')
-axes[0].axvline(np.median(counts), color='orange', linestyle='--', label=f'median {np.median(counts):.0f}')
-axes[0].axvline(64, color='green', linestyle=':', label='effective_span=64')
-axes[0].set_xlabel('Frame count')
-axes[0].set_ylabel('Number of sequences')
-axes[0].set_title('ASL-Citizen augmented — frame count distribution')
-axes[0].legend()
+# ── original videos ───────────────────────────────────────────────────────────
+vid_root = Path('/scratch-shared/psobecki/ASL_Citizen/videos')
 
-axes[1].hist(counts, bins=60, color='steelblue', edgecolor='white', linewidth=0.4, cumulative=True, density=True)
-axes[1].axvline(64, color='green', linestyle=':', label='effective_span=64')
-axes[1].set_xlabel('Frame count')
-axes[1].set_ylabel('Cumulative fraction')
-axes[1].set_title('CDF')
-axes[1].legend()
+orig_counts = []
+for vpath in sorted(vid_root.rglob('*.mp4')):
+    cap = cv2.VideoCapture(str(vpath))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    if n > 0:
+        orig_counts.append(n)
 
-out = Path('/home/psobecki/fork_mmaction2/jobs/output/asl_citizen_aug_frame_counts.png')
+orig_counts = np.array(orig_counts)
+
+print('\n=== Original videos ===')
+print(f'Videos analysed    : {len(orig_counts)}')
+print(f'Min                : {orig_counts.min()}')
+print(f'Max                : {orig_counts.max()}')
+print(f'Mean               : {orig_counts.mean():.1f}')
+print(f'Median             : {np.median(orig_counts):.1f}')
+print(f'Std                : {orig_counts.std():.1f}')
+print(f'Pct < 64 frames    : {(orig_counts < 64).mean()*100:.1f}%  ({(orig_counts < 64).sum()} videos)')
+print(f'Pct < 32 frames    : {(orig_counts < 32).mean()*100:.1f}%  ({(orig_counts < 32).sum()} videos)')
+
+# ── plot ──────────────────────────────────────────────────────────────────────
+fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+
+def plot_hist(ax, counts, title, color):
+    ax.hist(counts, bins=60, color=color, edgecolor='white', linewidth=0.4)
+    ax.axvline(counts.mean(),        color='red',    linestyle='--', label=f'mean {counts.mean():.0f}')
+    ax.axvline(np.median(counts),    color='orange', linestyle='--', label=f'median {np.median(counts):.0f}')
+    ax.axvline(64, color='green', linestyle=':', label='effective_span=64')
+    ax.set_xlabel('Frame count')
+    ax.set_ylabel('Count')
+    ax.set_title(title)
+    ax.legend()
+
+def plot_cdf(ax, counts, title, color):
+    ax.hist(counts, bins=60, color=color, edgecolor='white', linewidth=0.4,
+            cumulative=True, density=True)
+    ax.axvline(64, color='green', linestyle=':', label='effective_span=64')
+    ax.set_xlabel('Frame count')
+    ax.set_ylabel('Cumulative fraction')
+    ax.set_title(title)
+    ax.legend()
+
+plot_hist(axes[0, 0], aug_counts,  'Augmented sequences — histogram', 'steelblue')
+plot_cdf (axes[0, 1], aug_counts,  'Augmented sequences — CDF',       'steelblue')
+plot_hist(axes[1, 0], orig_counts, 'Original videos — histogram',     'coral')
+plot_cdf (axes[1, 1], orig_counts, 'Original videos — CDF',           'coral')
+
+out = Path('/home/psobecki/fork_mmaction2/jobs/output/asl_citizen_frame_counts.png')
 plt.tight_layout()
 plt.savefig(out, dpi=150)
-print(f'Plot saved to {out}')
+print(f'\nPlot saved to {out}')
 EOF
