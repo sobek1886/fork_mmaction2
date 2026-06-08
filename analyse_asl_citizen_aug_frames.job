@@ -1,0 +1,69 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=0
+#SBATCH --job-name=analyse_asl_aug_frames
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:15:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_analyse_asl_aug_frames_%A.txt
+
+module purge
+module load 2025
+
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+python - <<'EOF'
+from pathlib import Path
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+aug_root = Path('/scratch-shared/psobecki/ASL_Citizen/augmented_frames')
+
+counts = []
+for video_dir in sorted(aug_root.iterdir()):
+    if not video_dir.is_dir():
+        continue
+    for aug_dir in sorted(video_dir.iterdir()):
+        if not aug_dir.is_dir():
+            continue
+        n = len(list(aug_dir.glob('*.jpg')))
+        if n > 0:
+            counts.append(n)
+
+counts = np.array(counts)
+print(f'Sequences analysed : {len(counts)}')
+print(f'Min                : {counts.min()}')
+print(f'Max                : {counts.max()}')
+print(f'Mean               : {counts.mean():.1f}')
+print(f'Median             : {np.median(counts):.1f}')
+print(f'Std                : {counts.std():.1f}')
+print(f'Pct < 64 frames    : {(counts < 64).mean()*100:.1f}%  ({(counts < 64).sum()} seqs)')
+print(f'Pct < 32 frames    : {(counts < 32).mean()*100:.1f}%  ({(counts < 32).sum()} seqs)')
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+axes[0].hist(counts, bins=60, color='steelblue', edgecolor='white', linewidth=0.4)
+axes[0].axvline(counts.mean(),   color='red',    linestyle='--', label=f'mean {counts.mean():.0f}')
+axes[0].axvline(np.median(counts), color='orange', linestyle='--', label=f'median {np.median(counts):.0f}')
+axes[0].axvline(64, color='green', linestyle=':', label='effective_span=64')
+axes[0].set_xlabel('Frame count')
+axes[0].set_ylabel('Number of sequences')
+axes[0].set_title('ASL-Citizen augmented — frame count distribution')
+axes[0].legend()
+
+axes[1].hist(counts, bins=60, color='steelblue', edgecolor='white', linewidth=0.4, cumulative=True, density=True)
+axes[1].axvline(64, color='green', linestyle=':', label='effective_span=64')
+axes[1].set_xlabel('Frame count')
+axes[1].set_ylabel('Cumulative fraction')
+axes[1].set_title('CDF')
+axes[1].legend()
+
+out = Path('/home/psobecki/fork_mmaction2/jobs/output/asl_citizen_aug_frame_counts.png')
+plt.tight_layout()
+plt.savefig(out, dpi=150)
+print(f'Plot saved to {out}')
+EOF
