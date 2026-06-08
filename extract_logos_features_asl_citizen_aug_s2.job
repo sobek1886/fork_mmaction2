@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=logos_asl_aug_s2
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=5
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_logos_asl_aug_s2_%A.txt
+
+module purge
+module load 2025
+
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+# Augmentations generated with --stride 2 (every 2nd frame stored).
+# --frame_interval 1 compensates: effective temporal sampling is identical
+# to stride-1 augmentations extracted with the default --frame_interval 2.
+srun python extract_logos_features_asl_citizen_aug.py \
+    --aug_dir      /scratch-shared/psobecki/ASL_Citizen/augmented_frames_s2 \
+    --output_dir   /home/psobecki/ASL_Citizen/logos_features_endanchor \
+    --checkpoint   $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
+    --frame_interval 1 \
+    --workers 5 \
+    --batch_size 8
+#   --overwrite

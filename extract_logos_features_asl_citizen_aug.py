@@ -43,7 +43,7 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
 
 def _preprocess_worker(args):
-    frame_dir, out_path, overwrite = args
+    frame_dir, out_path, overwrite, frame_interval = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
@@ -86,7 +86,7 @@ def _preprocess_worker(args):
 
         processed = np.stack(processed)
         T = len(processed)
-        effective_span = CLIP_LEN * FRAME_INTERVAL
+        effective_span = CLIP_LEN * frame_interval
 
         if T < effective_span:
             starts = [0]
@@ -97,7 +97,7 @@ def _preprocess_worker(args):
 
         clips = []
         for start in starts:
-            indices = [min(start + i * FRAME_INTERVAL, T - 1) for i in range(CLIP_LEN)]
+            indices = [min(start + i * frame_interval, T - 1) for i in range(CLIP_LEN)]
             clip = processed[indices].transpose(1, 0, 2, 3)
             clips.append(clip)
 
@@ -141,7 +141,7 @@ def gpu_inference(backbone, clips_np, device, batch_size):
     return np.concatenate(parts, axis=0)
 
 
-def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool):
+def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_interval: int):
     """augmented_frames/{video_id}/{aug_name}/*.jpg → asl_citizen_{video_id}_{aug_name}.npy"""
     work = []
     for video_id_dir in sorted(aug_dir.iterdir()):
@@ -156,7 +156,7 @@ def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool):
             aug_name = aug_dir_entry.name   # e.g. "glasses"
             key = f'asl_citizen_{video_id}_{aug_name}'
             out_path = output_dir / f'{key}.npy'
-            work.append((str(aug_dir_entry), str(out_path), overwrite))
+            work.append((str(aug_dir_entry), str(out_path), overwrite, frame_interval))
     return work
 
 
@@ -170,6 +170,9 @@ def main():
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--prefetch', type=int, default=None)
+    parser.add_argument('--frame_interval', type=int, default=2,
+                        help='Temporal stride between sampled frames (default 2). '
+                             'Use 1 for augmentations generated with --stride 2.')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
 
@@ -184,7 +187,7 @@ def main():
     print(f'Loading backbone from {args.checkpoint} ...')
     backbone = load_backbone(args.checkpoint, device)
 
-    work = build_work_list(aug_dir, output_dir, args.overwrite)
+    work = build_work_list(aug_dir, output_dir, args.overwrite, args.frame_interval)
     print(f'Found {len(work)} augmented frame sequences to process')
 
     skipped = errors = done = 0
