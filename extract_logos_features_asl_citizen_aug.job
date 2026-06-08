@@ -16,7 +16,7 @@ source .venv/bin/activate
 
 srun python extract_logos_features_asl_citizen_aug.py \
     --aug_dir    /scratch-shared/psobecki/ASL_Citizen/augmented_frames \
-    --output_dir /home/psobecki/ASL_Citizen/logos_features \
+    --output_dir /home/psobecki/ASL_Citizen/logos_features_endanchor \
     --checkpoint $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --workers 5 \
     --batch_size 8

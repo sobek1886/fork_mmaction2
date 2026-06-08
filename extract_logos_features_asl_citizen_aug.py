@@ -92,6 +92,8 @@ def _preprocess_worker(args):
             starts = [0]
         else:
             starts = list(range(0, T - effective_span + 1, CLIP_STRIDE)) or [0]
+            if starts[-1] + effective_span < T:
+                starts.append(T - effective_span)
 
         clips = []
         for start in starts:
