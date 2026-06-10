@@ -1,0 +1,53 @@
+#!/bin/bash
+# Run 3 (aug-as-data): fine-tune Logos MViTv2-S on ORIGINAL + AUGMENTED videos, CE only.
+# Augmented rows in splits_aug/train.csv (e.g. {id}_glasses.mp4) resolve to the JPG
+# frame dirs augmented_frames/{id}/{glasses,shirt_1}/. No loss change vs run 2 — augs are
+# just extra training data. Then re-extract features for Eval A + Eval B.
+# FULL FT: UNFREEZE=16 LR=1e-5 LLRD=0.75 BATCH=6 GRAD_ACCUM=4 EPOCHS=15 TAG=run3_full
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_run3
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=36:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+TAG=run3
+UNFREEZE=2
+LR=1e-3
+LLRD=1.0
+BATCH=16
+GRAD_ACCUM=1
+EPOCHS=10
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS_AUG=$HOME/ASL_Citizen/splits_aug
+SAVE_DIR=$HOME/fork_mmaction2/runs/asl_ft_${TAG}
+FEAT_DIR=$HOME/ASL_Citizen/logos_features_${TAG}
+
+srun python train_logos_asl_citizen.py \
+    --train_csv      $SPLITS_AUG/train.csv \
+    --video_dir      $VIDEO_DIR \
+    --aug_frames_dir $AUG_FRAMES \
+    --checkpoint     $CKPT \
+    --save_dir       $SAVE_DIR \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16
+
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_last.pt \
+    --dataset_name asl_citizen \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — now run eval_asl_citizen_features.job (MMPT venv)."

@@ -1,0 +1,53 @@
+#!/bin/bash
+# Run 2 (baseline): fine-tune Logos MViTv2-S on ORIGINAL ASL-Citizen, CE only.
+# Then re-extract features over all videos for Eval A + Eval B.
+# Partial fine-tune first (top 2 blocks). To escalate to FULL FT, edit the vars below:
+#   UNFREEZE=16  LR=1e-5  LLRD=0.75  BATCH=6  GRAD_ACCUM=4  EPOCHS=15  TAG=run2_full
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_run2
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=36:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+# ── run config ───────────────────────────────────────────────────────────────
+TAG=run2
+UNFREEZE=2
+LR=1e-3
+LLRD=1.0
+BATCH=16
+GRAD_ACCUM=1
+EPOCHS=10
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+SPLITS=$HOME/ASL_Citizen/splits
+SAVE_DIR=$HOME/fork_mmaction2/runs/asl_ft_${TAG}
+FEAT_DIR=$HOME/ASL_Citizen/logos_features_${TAG}
+
+# ── train ────────────────────────────────────────────────────────────────────
+srun python train_logos_asl_citizen.py \
+    --train_csv  $SPLITS/train.csv \
+    --video_dir  $VIDEO_DIR \
+    --checkpoint $CKPT \
+    --save_dir   $SAVE_DIR \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16
+
+# ── re-extract all videos with the fine-tuned checkpoint (skips existing .npy) ─
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_last.pt \
+    --dataset_name asl_citizen \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — now run eval_asl_citizen_features.job (MMPT venv)."
