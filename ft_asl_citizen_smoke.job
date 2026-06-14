@@ -47,7 +47,7 @@ echo ""
 echo "########## 3) Train->extract round-trip (2 videos) ##########"
 TINY=$SMOKE/tiny_videos
 rm -rf "$TINY"; mkdir -p "$TINY"
-ls "$VIDEO_DIR"/*.mp4 | head -2 | while read -r f; do ln -sf "$f" "$TINY/"; done
+find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | head -2 | while read -r f; do ln -sf "$f" "$TINY/"; done
 srun python extract_logos_features.py \
     --video_dir   "$TINY" \
     --output_dir  $SMOKE/tiny_feats \
