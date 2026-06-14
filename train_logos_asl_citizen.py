@@ -474,6 +474,55 @@ def cosine_lr(step, total_steps, warmup_steps, base_scale=1.0):
     return base_scale * 0.5 * (1.0 + np.cos(np.pi * min(1.0, progress)))
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# MLflow logging (self-contained, failure-tolerant — mirrors mlflow_quickstart.py /
+# mlflow_eval_logging.py from the MMPT repo, which can't be imported from here)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_MLFLOW_TRACKING_URI = "https://mlflow.ai.mytkhgroup.com/"
+
+
+class MLflowLogger:
+    """Logs backbone-FT training to MLflow. Any failure (missing pkg / unreachable
+    server) disables logging and never interrupts training."""
+
+    def __init__(self, enable, experiment, run_name, params):
+        self.ok = False
+        self.mlflow = None
+        if not enable:
+            return
+        try:
+            import mlflow
+            self.mlflow = mlflow
+            mlflow.set_tracking_uri(_MLFLOW_TRACKING_URI)
+            mlflow.set_experiment(experiment)
+            mlflow.start_run(run_name=run_name)
+            mlflow.log_params({k: str(v) for k, v in params.items()})
+            mlflow.set_tags({"kind": "backbone_ft",
+                             "node": os.environ.get("SLURMD_NODENAME", "unknown"),
+                             "job_id": os.environ.get("SLURM_JOB_ID", "unknown")})
+            self.ok = True
+            print(f"[MLflow] logging to '{experiment}' run '{run_name}'")
+        except Exception as exc:
+            print(f"[MLflow] disabled ({exc})")
+
+    def log(self, metrics, step=None):
+        if not self.ok:
+            return
+        try:
+            self.mlflow.log_metrics({k: float(v) for k, v in metrics.items()}, step=step)
+        except Exception as exc:
+            print(f"[MLflow] log warning: {exc}")
+
+    def end(self):
+        if not self.ok:
+            return
+        try:
+            self.mlflow.end_run()
+        except Exception:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -520,6 +569,12 @@ def main():
     ap.add_argument("--log_interval", type=int, default=20)
     ap.add_argument("--smoke", action="store_true",
                     help="tiny run: 20 videos, 2 steps, batch 2 — verifies the pipeline")
+    # mlflow
+    ap.add_argument("--mlflow", action="store_true",
+                    help="log training (CE / consistency / lr) to MLflow; failure-tolerant")
+    ap.add_argument("--mlflow_experiment", type=str, default="asl-citizen-backbone-ft")
+    ap.add_argument("--mlflow_run_name", type=str, default=None,
+                    help="MLflow run name (default: basename of --save_dir, e.g. asl_ft_run1)")
     args = ap.parse_args()
 
     if args.smoke:
@@ -580,6 +635,19 @@ def main():
     ce = nn.CrossEntropyLoss()
 
     print(f"steps/epoch={steps_per_epoch} total_steps={total_steps} warmup={warmup_steps}")
+
+    mlf = MLflowLogger(
+        args.mlflow, args.mlflow_experiment,
+        args.mlflow_run_name or os.path.basename(os.path.normpath(args.save_dir)),
+        params={"paired": args.paired, "lambda_consist": args.lambda_consist,
+                "lambda_supcon": args.lambda_supcon, "unfreeze_blocks": args.unfreeze_blocks,
+                "llrd": args.llrd, "lr": args.lr, "weight_decay": args.weight_decay,
+                "epochs": args.epochs, "batch_size": args.batch_size,
+                "grad_accum": args.grad_accum, "aug_names": ",".join(args.aug_names),
+                "orig_preproc": args.orig_preproc, "aug_preproc": args.aug_preproc,
+                "train_csv": args.train_csv, "num_classes": args.num_classes,
+                "total_steps": total_steps, "n_train": len(ds)},
+    )
 
     gstep = 0
     n_pair_batches = 0
@@ -663,11 +731,14 @@ def main():
 
                 running += loss_ce.item(); seen += 1
                 if gstep % args.log_interval == 0:
-                    msg = (f"ep{epoch} step{gstep}/{total_steps} "
-                           f"ce={running/seen:.4f} consist={loss_consist.item():.4f} "
-                           f"lr={base_lrs[0]*lr_scale:.2e} "
-                           f"{seen*args.batch_size/(time.time()-t0):.1f} clip/s")
-                    print(msg, flush=True)
+                    ce_avg = running / seen
+                    cur_lr = base_lrs[0] * lr_scale
+                    print(f"ep{epoch} step{gstep}/{total_steps} "
+                          f"ce={ce_avg:.4f} consist={loss_consist.item():.4f} "
+                          f"lr={cur_lr:.2e} "
+                          f"{seen*args.batch_size/(time.time()-t0):.1f} clip/s", flush=True)
+                    mlf.log({"train_ce": ce_avg, "consist": loss_consist.item(),
+                             "lr": cur_lr, "epoch": epoch}, step=gstep)
                     running, seen, t0 = 0.0, 0, time.time()
 
                 if args.max_steps and gstep >= args.max_steps:
@@ -681,6 +752,8 @@ def main():
     save_ckpt(best_path, extra={"note": "alias of last (no val selection wired)"})
     if args.paired:
         print(f"batches with ≥1 aug pair: {n_pair_batches}")
+        mlf.log({"n_pair_batches": n_pair_batches}, step=gstep)
+    mlf.end()
     print(f"Done. Checkpoints in {args.save_dir}")
     print(f"Re-extract with: python extract_logos_features.py --checkpoint {last_path} ...")
 

@@ -40,7 +40,8 @@ srun python train_logos_asl_citizen.py \
     --save_dir   $SAVE_DIR \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
-    --workers 16
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG}
 
 # ── re-extract all videos with the fine-tuned checkpoint (skips existing .npy) ─
 srun python extract_logos_features.py \

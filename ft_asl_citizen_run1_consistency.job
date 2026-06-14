@@ -46,7 +46,8 @@ srun python train_logos_asl_citizen.py \
     --paired --lambda_consist $LAMBDA_CONSIST \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
-    --workers 16
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG}
 
 srun python extract_logos_features.py \
     --video_dir   $VIDEO_DIR \
