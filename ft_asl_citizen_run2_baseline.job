@@ -29,8 +29,8 @@ EPOCHS=10
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
 SPLITS=$HOME/ASL_Citizen/splits
-SAVE_DIR=$HOME/fork_mmaction2/runs/asl_ft_${TAG}
-FEAT_DIR=$HOME/ASL_Citizen/logos_features_${TAG}
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
 
 # ── train ────────────────────────────────────────────────────────────────────
 srun python train_logos_asl_citizen.py \
@@ -48,6 +48,7 @@ srun python extract_logos_features.py \
     --output_dir  $FEAT_DIR \
     --checkpoint  $SAVE_DIR/checkpoint_last.pt \
     --dataset_name asl_citizen \
+    --preproc logos_native \
     --workers 16 --batch_size 8
 
 echo "Done. Features in $FEAT_DIR — now run eval_asl_citizen_features.job (MMPT venv)."

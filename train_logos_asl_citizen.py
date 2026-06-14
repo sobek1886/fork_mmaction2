@@ -82,26 +82,37 @@ def _load_jpg_dir(path):
     return frames
 
 
+PAD_VALUE = 114   # grey, matches Logos SquarePadding default
+
+
 def _preprocess_frame(frame, mode):
     """Resize + normalize one RGB uint8 frame → (3, 224, 224) float32.
 
-    mode='direct224'     : resize directly to 224x224 (matches extract_logos_features.py;
-                           originals are pre-cropped square). This is the eval-time path.
-    mode='resize300crop' : resize shortest side to 300, pad to 300, center-crop 224
-                           (matches extract_logos_features_asl_citizen_aug.py).
+    MUST stay in sync with extract_logos_features.preprocess_frame so that features
+    re-extracted after fine-tuning match what the model saw during training.
+
+    mode='logos_native' : resize LONG side -> 300, pad to 300x300 (grey 114),
+                          center-crop 224. Aspect-preserving — what the Logos model was
+                          trained on; correct for non-square ASL-Citizen. DEFAULT.
+    mode='direct224'    : resize directly to 224x224 (legacy; aspect-distorts non-square
+                          frames — used by the old baseline/endanchor features).
+    mode='resize300crop': resize SHORTEST side -> 300, pad, center-crop 224 (the old aug
+                          extractor's path; crops the long-axis edges).
     """
     import cv2
     if mode == "direct224":
         frame = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
-    elif mode == "resize300crop":
+    elif mode in ("logos_native", "resize300crop"):
         h, w = frame.shape[:2]
-        scale = RESIZE / min(h, w)
+        # logos_native fits the whole frame (long side -> 300); resize300crop fills (short side).
+        scale = RESIZE / (max(h, w) if mode == "logos_native" else min(h, w))
         nh, nw = int(round(h * scale)), int(round(w * scale))
         frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
         pad_h = max(0, RESIZE - nh)
         pad_w = max(0, RESIZE - nw)
         frame = np.pad(frame, ((pad_h // 2, pad_h - pad_h // 2),
-                               (pad_w // 2, pad_w - pad_w // 2), (0, 0)), mode="constant")
+                               (pad_w // 2, pad_w - pad_w // 2), (0, 0)),
+                       mode="constant", constant_values=PAD_VALUE)
         y0 = (frame.shape[0] - INPUT_SIZE) // 2
         x0 = (frame.shape[1] - INPUT_SIZE) // 2
         frame = frame[y0:y0 + INPUT_SIZE, x0:x0 + INPUT_SIZE]
@@ -476,9 +487,11 @@ def main():
     ap.add_argument("--num_classes", type=int, default=2731)
     ap.add_argument("--aug_names", nargs="+", default=list(AUG_NAMES))
     # preprocessing modes
-    ap.add_argument("--orig_preproc", choices=["direct224", "resize300crop"], default="direct224",
-                    help="must match re-extraction (extract_logos_features.py = direct224)")
-    ap.add_argument("--aug_preproc", choices=["direct224", "resize300crop"], default="direct224")
+    ap.add_argument("--orig_preproc", choices=["logos_native", "direct224", "resize300crop"],
+                    default="logos_native",
+                    help="must match re-extraction (extract_logos_features.py --preproc)")
+    ap.add_argument("--aug_preproc", choices=["logos_native", "direct224", "resize300crop"],
+                    default="logos_native")
     ap.add_argument("--frame_interval", type=int, default=FRAME_INTERVAL)
     ap.add_argument("--aug_frame_interval", type=int, default=FRAME_INTERVAL,
                     help="use 1 if augmented frames were generated with stride 2")

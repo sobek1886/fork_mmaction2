@@ -34,8 +34,38 @@ CLIP_LEN      = 32     # frames fed to MViTv2-S
 FRAME_INTERVAL = 2     # sample every 2nd frame → each clip spans 64 consecutive frames
 CLIP_STRIDE   = 32     # clips are non-overlapping (stride = CLIP_LEN)
 INPUT_SIZE    = 224    # spatial size expected by MViTv2-S
+RESIZE        = 300    # logos_native: long side resized to this before pad + crop
+PAD_VALUE     = 114    # grey pad value (matches Logos SquarePadding default)
 MEAN = np.array([140.99762122, 129.92701646, 125.25081198], dtype=np.float32)
 STD  = np.array([62.07248248,  62.94645644,  61.42221137],  dtype=np.float32)
+
+
+def preprocess_frame(frame_rgb, mode):
+    """Resize + normalise one RGB frame -> (3, 224, 224) float32.
+
+    mode='logos_native': resize LONG side -> 300, pad to 300x300 (grey 114),
+                         center-crop 224. Aspect-preserving — matches how the Logos
+                         model was trained; correct for non-square inputs (ASL-Citizen).
+    mode='direct224':    resize directly to 224x224 (legacy; only correct if the frame
+                         is already square, else aspect-distorts).
+    """
+    import cv2
+    if mode == "direct224":
+        f = cv2.resize(frame_rgb, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_LINEAR)
+    elif mode == "logos_native":
+        h, w = frame_rgb.shape[:2]
+        scale = RESIZE / max(h, w)
+        nh, nw = int(round(h * scale)), int(round(w * scale))
+        f = cv2.resize(frame_rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        ph, pw = RESIZE - nh, RESIZE - nw
+        f = np.pad(f, ((ph // 2, ph - ph // 2), (pw // 2, pw - pw // 2), (0, 0)),
+                   mode="constant", constant_values=PAD_VALUE)
+        off = (RESIZE - INPUT_SIZE) // 2
+        f = f[off:off + INPUT_SIZE, off:off + INPUT_SIZE]
+    else:
+        raise ValueError(f"unknown preproc mode: {mode}")
+    f = (f.astype(np.float32) - MEAN) / STD       # (H, W, 3)
+    return f.transpose(2, 0, 1)                    # (3, H, W)
 
 
 # ── Preprocessing (CPU, runs in worker processes) ─────────────────────────────
@@ -47,7 +77,7 @@ def _preprocess_worker(args):
         clips_np: (N, 3, CLIP_LEN, 224, 224) float32, or None on skip/error
         status:   'ok' | 'skip' | 'error: <msg>'
     """
-    vpath, out_path, overwrite = args
+    vpath, out_path, overwrite, preproc = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
@@ -68,19 +98,21 @@ def _preprocess_worker(args):
         return out_path, None, f'error: {e}'
 
     try:
-        import cv2
         T = len(frames)
 
-        # Preprocess each frame: resize to INPUT_SIZE × INPUT_SIZE → normalise
-        # (videos are pre-cropped to square by the offline crop scripts)
-        processed = []
-        for frame in frames:
-            frame = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE),
-                               interpolation=cv2.INTER_LINEAR)
-            frame = (frame.astype(np.float32) - MEAN) / STD  # (H, W, 3)
-            processed.append(frame.transpose(2, 0, 1))       # (3, H, W)
-
-        processed = np.stack(processed)  # (T, 3, H, W)
+        # NOTE: the original baseline + endanchor feature sets (logos_features,
+        # logos_features_endanchor) were extracted with direct resize-to-224, i.e.
+        # preproc='direct224'. ASL-Citizen frames are NOT square, so this aspect-
+        # distorts them. Kept here for reference:
+        #     processed = []
+        #     for frame in frames:
+        #         frame = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE),
+        #                            interpolation=cv2.INTER_LINEAR)
+        #         frame = (frame.astype(np.float32) - MEAN) / STD  # (H, W, 3)
+        #         processed.append(frame.transpose(2, 0, 1))       # (3, H, W)
+        #     processed = np.stack(processed)
+        # Now switchable via `preproc` (default 'logos_native', aspect-preserving):
+        processed = np.stack([preprocess_frame(frame, preproc) for frame in frames])  # (T,3,H,W)
 
         # Build clips with FRAME_INTERVAL subsampling
         effective_span = CLIP_LEN * FRAME_INTERVAL  # 64 frames
@@ -177,6 +209,12 @@ def main():
                         help='CPU worker processes for video decoding')
     parser.add_argument('--batch_size',   type=int, default=64,
                         help='Clips per GPU forward pass')
+    parser.add_argument('--preproc', choices=['logos_native', 'direct224'],
+                        default='logos_native',
+                        help='Frame preprocessing. logos_native = resize long side to 300, '
+                             'pad to 300x300 (grey 114), center-crop 224 (aspect-preserving, '
+                             'correct for non-square ASL-Citizen). direct224 = legacy square '
+                             'resize used by the old baseline/endanchor features.')
     parser.add_argument('--prefetch',     type=int, default=None,
                         help='Videos to prefetch (default: workers * 8)')
     parser.add_argument('--overwrite',    action='store_true')
@@ -187,6 +225,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'CPU workers: {args.workers}  |  GPU batch: {args.batch_size}  |  Prefetch: {prefetch}')
+    print(f'Preprocessing: {args.preproc}')
 
     print(f'Loading backbone from {args.checkpoint} ...')
     backbone = load_backbone(args.checkpoint, device)
@@ -203,7 +242,7 @@ def main():
     for vpath in video_files:
         vid = Path(vpath).stem
         out_path = os.path.join(args.output_dir, f'{args.dataset_name}_{vid}.npy')
-        work.append((vpath, out_path, args.overwrite))
+        work.append((vpath, out_path, args.overwrite, args.preproc))
 
     skipped = errors = done = 0
     pending_clips = []   # list of (N_i, 3, T, H, W) arrays
