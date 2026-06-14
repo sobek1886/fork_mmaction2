@@ -242,7 +242,7 @@ class PairedDataset(Dataset):
 
     def __init__(self, csv_path, video_dir, aug_frames_dir, gloss_to_idx,
                  orig_mode, aug_mode, frame_interval, aug_frame_interval,
-                 aug_names, max_videos=None):
+                 aug_names, max_videos=None, require_augs=False):
         self.video_dir = video_dir
         self.orig_mode, self.aug_mode = orig_mode, aug_mode
         self.frame_interval, self.aug_frame_interval = frame_interval, aug_frame_interval
@@ -266,11 +266,13 @@ class PairedDataset(Dataset):
                     aug_dirs.append(str(fdir))
             if aug_dirs:
                 n_with_aug += 1
+            elif require_augs:
+                continue   # keep only paired items (used by the smoke test)
             self.items.append((orig_path, aug_dirs, gloss_to_idx[gloss]))
             if max_videos and len(self.items) >= max_videos:
                 break
         print(f"[PairedDataset] {csv_path}: {len(self.items)} originals "
-              f"({n_with_aug} with augs, {missing} unresolved)")
+              f"({n_with_aug} with augs, {missing} unresolved, require_augs={require_augs})")
 
     def __len__(self):
         return len(self.items)
@@ -546,6 +548,9 @@ def main():
                     help="use 1 if augmented frames were generated with stride 2")
     # objective
     ap.add_argument("--paired", action="store_true", help="Run 1: enable consistency loss")
+    ap.add_argument("--require_augs", action="store_true",
+                    help="(paired) keep only videos that HAVE augmentations — guarantees the "
+                         "consistency loss fires; used by the smoke test")
     ap.add_argument("--lambda_consist", type=float, default=0.5)
     ap.add_argument("--lambda_supcon", type=float, default=0.0)
     ap.add_argument("--supcon_temperature", type=float, default=0.07)
@@ -606,7 +611,7 @@ def main():
         ds = PairedDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
                            args.orig_preproc, args.aug_preproc,
                            args.frame_interval, args.aug_frame_interval,
-                           args.aug_names, args.max_videos)
+                           args.aug_names, args.max_videos, require_augs=args.require_augs)
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
                             num_workers=args.workers, collate_fn=paired_collate,
                             drop_last=True, pin_memory=True)
