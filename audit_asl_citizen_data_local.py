@@ -22,11 +22,11 @@ import csv
 import os
 from pathlib import Path
 
-DEF_AUG   = "/scratch-shared/psobecki/ASL_Citizen/augmented_frames"
+DEF_AUG   = '/Users/piotr/Projects/Thesis/nano_banana/output/flux-aug/asl_citizen/augmented_frames' #"/scratch-shared/psobecki/ASL_Citizen/augmented_frames"
 DEF_VIDEO = "/scratch-shared/psobecki/ASL_Citizen/videos"
 DEF_SPLITS = "/home/psobecki/ASL_Citizen/splits"
 DEF_SPLITS_AUG = "/home/psobecki/ASL_Citizen/splits_aug"
-AUG_NAMES = ("glasses", "shirt_1")
+AUG_NAMES = ("signer_swap", "skin_mst_diffusion")
 
 
 def count_jpgs(d):
@@ -157,7 +157,7 @@ def main():
             print(f"  *** {empty+missing} aug rows are unusable — regenerate splits_aug "
                   f"or re-create those frames ***")
 
-    print("\n" + "=" * W)
+    '''print("\n" + "=" * W)
     print("ORIGINAL VIDEOS  (splits/{train,val,test}.csv)")
     print("=" * W)
     orig = audit_originals(args.video_dir, args.splits_dir)
@@ -165,7 +165,7 @@ def main():
         print(f"  {split:5s}  ok={r['ok']:6d}  missing={r['missing']:5d}  zero_byte={r['zero']:4d}")
         if r["examples"]:
             print(f"         e.g. missing: {r['examples'][:5]}")
-    print("=" * W)
+    print("=" * W)'''
 
 
 if __name__ == "__main__":
