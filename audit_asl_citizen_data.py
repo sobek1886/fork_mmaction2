@@ -26,7 +26,7 @@ DEF_AUG   = "/scratch-shared/psobecki/ASL_Citizen/augmented_frames"
 DEF_VIDEO = "/scratch-shared/psobecki/ASL_Citizen/videos"
 DEF_SPLITS = "/home/psobecki/ASL_Citizen/splits"
 DEF_SPLITS_AUG = "/home/psobecki/ASL_Citizen/splits_aug"
-AUG_NAMES = ("glasses", "shirt_1")
+AUG_NAMES = ("glasses", "shirt_1", "skin_mst_diffusion","signer_swap")
 
 
 def count_jpgs(d):
