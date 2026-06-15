@@ -493,6 +493,27 @@ def cosine_lr(step, total_steps, warmup_steps, base_scale=1.0):
     return base_scale * 0.5 * (1.0 + np.cos(np.pi * min(1.0, progress)))
 
 
+@torch.no_grad()
+def validate(model, loader, device, use_amp):
+    """Closed-set classification on the (signer-disjoint) val split.
+    Returns (val_ce, val_top1, val_top5). Deterministic center clip per video."""
+    model.eval()
+    ce_sum = nn.CrossEntropyLoss(reduction="sum")
+    loss_sum = 0.0
+    tot = c1 = c5 = 0
+    for clips, labels in loader:
+        clips = clips.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            _, logits = model(clips)
+        loss_sum += ce_sum(logits.float(), labels).item()
+        top5 = logits.topk(5, dim=1).indices
+        c1 += (top5[:, 0] == labels).sum().item()
+        c5 += (top5 == labels.unsqueeze(1)).any(dim=1).sum().item()
+        tot += labels.numel()
+    return loss_sum / max(1, tot), c1 / max(1, tot), c5 / max(1, tot)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # MLflow logging (self-contained, failure-tolerant — mirrors mlflow_quickstart.py /
 # mlflow_eval_logging.py from the MMPT repo, which can't be imported from here)
@@ -534,6 +555,17 @@ class MLflowLogger:
             self.mlflow.log_metrics({k: float(v) for k, v in metrics.items()}, step=step)
         except Exception as exc:
             print(f"[MLflow] log warning: {exc}")
+
+    def log_artifact_file(self, path):
+        """(Re)upload a file as an artifact — overwrites the previous copy, so calling
+        it periodically gives a live-updating log in the MLflow UI."""
+        if not self.ok or not path:
+            return
+        try:
+            if os.path.exists(path):
+                self.mlflow.log_artifact(path)
+        except Exception as exc:
+            print(f"[MLflow] artifact warning: {exc}", flush=True)
 
     def end(self):
         if not self.ok:
@@ -587,6 +619,14 @@ def main():
     ap.add_argument("--clip_grad", type=float, default=2.0)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--no_amp", action="store_true")
+    # validation (signer-disjoint val split → best-checkpoint selection + overfit signal)
+    ap.add_argument("--val_csv", default=None,
+                    help="val split CSV; if set, log val_ce/val_top1/val_top5 per epoch "
+                         "and save checkpoint_best.pt by best val_top1")
+    ap.add_argument("--val_every", type=int, default=1, help="validate every N epochs")
+    ap.add_argument("--val_batch_size", type=int, default=32)
+    ap.add_argument("--val_max_videos", type=int, default=None,
+                    help="cap val videos for speed (default: full val split)")
     # misc / smoke
     ap.add_argument("--max_videos", type=int, default=None)
     ap.add_argument("--max_steps", type=int, default=None)
@@ -599,6 +639,11 @@ def main():
     ap.add_argument("--mlflow_experiment", type=str, default="asl-citizen-backbone-ft")
     ap.add_argument("--mlflow_run_name", type=str, default=None,
                     help="MLflow run name (default: basename of --save_dir, e.g. asl_ft_run1)")
+    ap.add_argument("--slurm_log", default=None,
+                    help="path to the SLURM .txt log; re-uploaded to MLflow every "
+                         "--artifact_every steps for live monitoring")
+    ap.add_argument("--artifact_every", type=int, default=500,
+                    help="upload the --slurm_log artifact every N optimizer steps")
     args = ap.parse_args()
 
     if args.smoke:
@@ -644,6 +689,17 @@ def main():
     if len(ds) == 0:
         raise RuntimeError("empty dataset — check paths/splits")
 
+    # validation loader (originals only, deterministic center clip)
+    val_loader = None
+    if args.val_csv:
+        val_ds = ClipDataset(args.val_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
+                             False, args.orig_preproc, args.aug_preproc,
+                             args.frame_interval, args.aug_frame_interval,
+                             args.aug_names, args.val_max_videos)
+        if len(val_ds) > 0:
+            val_loader = DataLoader(val_ds, batch_size=args.val_batch_size, shuffle=False,
+                                    num_workers=args.workers, pin_memory=True)
+
     # model
     model = LogosClassifier(args.checkpoint, args.num_classes, device)
     set_trainable(model, args.unfreeze_blocks)
@@ -682,6 +738,7 @@ def main():
 
     gstep = 0
     n_pair_batches = 0
+    best_val = -1.0
     best_path = os.path.join(args.save_dir, "checkpoint_best.pt")
     last_path = os.path.join(args.save_dir, "checkpoint_last.pt")
 
@@ -768,22 +825,44 @@ def main():
                           f"ce={ce_avg:.4f} consist={loss_consist.item():.4f} "
                           f"lr={cur_lr:.2e} "
                           f"{seen*args.batch_size/(time.time()-t0):.1f} clip/s", flush=True)
-                    mlf.log({"train_ce": ce_avg, "consist": loss_consist.item(),
-                             "lr": cur_lr, "epoch": epoch}, step=gstep)
+                    logd = {"train_ce": ce_avg, "lr": cur_lr, "epoch": epoch}
+                    if args.paired:                       # consist is only meaningful when paired
+                        logd["consist"] = loss_consist.item()
+                    mlf.log(logd, step=gstep)
                     running, seen, t0 = 0.0, 0, time.time()
+
+                # refresh the live SLURM-log artifact in MLflow (coarser than metric logging)
+                if args.slurm_log and gstep % args.artifact_every == 0:
+                    mlf.log_artifact_file(args.slurm_log)
 
                 if args.max_steps and gstep >= args.max_steps:
                     stop = True
                     break
         save_ckpt(last_path, extra={"epoch": epoch, "gstep": gstep})
+
+        if val_loader is not None and ((epoch + 1) % args.val_every == 0
+                                       or epoch == args.epochs - 1):
+            vce, vt1, vt5 = validate(model, val_loader, device, use_amp)
+            print(f"  [val] epoch {epoch}: ce={vce:.4f} top1={vt1:.4f} top5={vt5:.4f}",
+                  flush=True)
+            mlf.log({"val_ce": vce, "val_top1": vt1, "val_top5": vt5}, step=gstep)
+            if vt1 > best_val:
+                best_val = vt1
+                save_ckpt(best_path, extra={"epoch": epoch, "val_top1": vt1})
+                print(f"  [val] new best top1={vt1:.4f} → checkpoint_best.pt", flush=True)
+
         if stop:
             break
 
     save_ckpt(last_path, extra={"epoch": args.epochs, "gstep": gstep})
-    save_ckpt(best_path, extra={"note": "alias of last (no val selection wired)"})
+    if best_val < 0:        # no validation ran → best = last
+        save_ckpt(best_path, extra={"note": "alias of last (no validation)"})
+    else:
+        print(f"Best val top1 = {best_val:.4f} (checkpoint_best.pt)")
     if args.paired:
         print(f"batches with ≥1 aug pair: {n_pair_batches}")
         mlf.log({"n_pair_batches": n_pair_batches}, step=gstep)
+    mlf.log_artifact_file(args.slurm_log)   # final training-log snapshot
     mlf.end()
     print(f"Done. Checkpoints in {args.save_dir}")
     print(f"Re-extract with: python extract_logos_features.py --checkpoint {last_path} ...")

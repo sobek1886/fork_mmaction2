@@ -17,6 +17,7 @@ module purge
 module load 2025
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
+export PYTHONUNBUFFERED=1   # keep the SLURM .txt current for live MLflow artifact uploads
 
 TAG=run3
 UNFREEZE=2
@@ -32,6 +33,7 @@ AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
 SPLITS_AUG=$HOME/ASL_Citizen/splits_aug
 SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
 FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
 
 srun python train_logos_asl_citizen.py \
     --train_csv      $SPLITS_AUG/train.csv \
@@ -42,12 +44,13 @@ srun python train_logos_asl_citizen.py \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
     --workers 16 \
-    --mlflow --mlflow_run_name asl_ft_${TAG}
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $HOME/ASL_Citizen/splits/val.csv
 
 srun python extract_logos_features.py \
     --video_dir   $VIDEO_DIR \
     --output_dir  $FEAT_DIR \
-    --checkpoint  $SAVE_DIR/checkpoint_last.pt \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
     --dataset_name asl_citizen \
     --preproc logos_native \
     --workers 16 --batch_size 8
@@ -56,5 +59,4 @@ echo "Done. Features in $FEAT_DIR — now run eval_asl_citizen_features.job (MMP
 
 # Attach the full SLURM log (.txt) to the MLflow training run as an artifact.
 RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
-LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
 [ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true

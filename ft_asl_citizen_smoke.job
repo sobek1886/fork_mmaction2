@@ -1,12 +1,13 @@
 #!/bin/bash
 # Smoke test for the backbone fine-tuning pipeline — cheap (~10 min, a few dozen SBU).
 # Verifies, before committing GPU-days to the real FT runs:
-#   1) CE path (run2/run3 shape): backbone loads, forward+backward runs, loss drops, ckpt saves.
-#   2) Paired path (run1 shape) with --require_augs: the appearance-consistency loss actually
-#      fires (only ~10% of videos have augs, so we force paired-only here).
-#   3) Train->extract handoff: the saved checkpoint re-extracts cleanly via the UNMODIFIED
-#      extract_logos_features.py (filename + key-prefix contract), on 2 videos.
-# A green run means the run1/2/3 jobs are safe to submit once budget lands.
+#   1) CE path (run2/run3 shape): backbone loads, forward+backward runs, loss drops,
+#      validation runs (val_top1/top5 logged) and checkpoint_best.pt is saved.
+#   2) Paired path (run1 shape) with --require_augs: the consistency loss actually fires.
+#   3) MLflow: metrics + the live .txt artifact actually reach the server (smoke_ce /
+#      smoke_paired runs in the asl-citizen-backbone-ft experiment).
+#   4) Train->extract handoff: checkpoint_best.pt re-extracts cleanly (2 videos).
+# Green here ⇒ run1/2/3 are safe to submit.
 
 #SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
@@ -20,19 +21,25 @@ module purge
 module load 2025
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
+export PYTHONUNBUFFERED=1
 
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
 AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
 SPLITS=$HOME/ASL_Citizen/splits
 SMOKE=/scratch-shared/psobecki/runs/asl_ft_smoke
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+EXP=asl-citizen-backbone-ft
 
-echo "########## 1) CE path (run2/run3 shape) ##########"
+echo "########## 1) CE path (run2/run3 shape) + validation + MLflow artifact ##########"
 srun python train_logos_asl_citizen.py --smoke \
     --train_csv  $SPLITS/train.csv \
     --video_dir  $VIDEO_DIR \
     --checkpoint $CKPT \
-    --save_dir   $SMOKE/ce
+    --save_dir   $SMOKE/ce \
+    --val_csv    $SPLITS/val.csv --val_max_videos 40 \
+    --mlflow --mlflow_experiment $EXP --mlflow_run_name smoke_ce \
+    --slurm_log "$LOGFILE" --artifact_every 1
 
 echo ""
 echo "########## 2) Paired path (run1 shape, consistency forced) ##########"
@@ -41,17 +48,20 @@ srun python train_logos_asl_citizen.py --smoke --paired --require_augs \
     --video_dir      $VIDEO_DIR \
     --aug_frames_dir $AUG_FRAMES \
     --checkpoint     $CKPT \
-    --save_dir       $SMOKE/paired
+    --save_dir       $SMOKE/paired \
+    --val_csv        $SPLITS/val.csv --val_max_videos 40 \
+    --mlflow --mlflow_experiment $EXP --mlflow_run_name smoke_paired \
+    --slurm_log "$LOGFILE" --artifact_every 1
 
 echo ""
-echo "########## 3) Train->extract round-trip (2 videos) ##########"
+echo "########## 3) Train->extract round-trip from checkpoint_best.pt (2 videos) ##########"
 TINY=$SMOKE/tiny_videos
 rm -rf "$TINY"; mkdir -p "$TINY"
 find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | head -2 | while read -r f; do ln -sf "$f" "$TINY/"; done
 srun python extract_logos_features.py \
     --video_dir   "$TINY" \
     --output_dir  $SMOKE/tiny_feats \
-    --checkpoint  $SMOKE/ce/checkpoint_last.pt \
+    --checkpoint  $SMOKE/ce/checkpoint_best.pt \
     --dataset_name asl_citizen \
     --preproc logos_native \
     --workers 4 --batch_size 4
@@ -59,6 +69,12 @@ srun python extract_logos_features.py \
 echo ""
 echo "########## result ##########"
 ls -la $SMOKE/ce $SMOKE/paired $SMOKE/tiny_feats
+
 echo ""
-echo "PASS if: checkpoint_last.pt exists in ce/ and paired/, .npy files exist in tiny_feats/,"
-echo "and the logs above show loss values + 'batches with >=1 aug pair: N' (N>0) for the paired run."
+echo "PASS if ALL of:"
+echo "  - checkpoint_best.pt AND checkpoint_last.pt exist in ce/ and paired/"
+echo "  - logs show a '[val] epoch 0: ce=.. top1=.. top5=..' line (validation ran)"
+echo "  - paired log shows 'batches with >=1 aug pair: N' (N>0)"
+echo "  - logs show '[MLflow] logged artifact ...' (NOT 'could not log artifact')"
+echo "  - .npy files exist in tiny_feats/  (best-checkpoint round-trip works)"
+echo "  - MLflow 'asl-citizen-backbone-ft' shows runs smoke_ce / smoke_paired with the .txt artifact"
