@@ -55,3 +55,8 @@ srun python extract_logos_features.py \
     --workers 16 --batch_size 8
 
 echo "Done. Features in $FEAT_DIR — eval via jobs/eval_asl_citizen_features.job."
+
+# Attach the full SLURM log (.txt) to the MLflow training run as an artifact.
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true

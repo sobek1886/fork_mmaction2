@@ -225,12 +225,19 @@ class ClipDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        kind, path, label, fi, mode = self.items[i]
-        frames = _decode_mp4(path) if kind == "mp4" else _load_jpg_dir(path)
-        rng = random.Random((os.getpid() << 20) ^ (i << 4) ^ int(time.time() * 1e3) & 0xFFFF) \
-            if self.train else random.Random(0)
-        clip = _sample_clip(frames, self.train, rng, mode, fi)
-        return torch.from_numpy(clip), label
+        # Skip empty/corrupt videos (0 decoded frames) by advancing to the next item,
+        # rather than crashing the whole run on one bad file.
+        for _ in range(50):
+            kind, path, label, fi, mode = self.items[i]
+            frames = _decode_mp4(path) if kind == "mp4" else _load_jpg_dir(path)
+            if frames:
+                rng = (random.Random((os.getpid() << 20) ^ (i << 4) ^ (int(time.time() * 1e3) & 0xFFFF))
+                       if self.train else random.Random(0))
+                clip = _sample_clip(frames, self.train, rng, mode, fi)
+                return torch.from_numpy(clip), label
+            print(f"[ClipDataset] WARNING: 0 frames, skipping {path}", flush=True)
+            i = (i + 1) % len(self.items)
+        raise RuntimeError("ClipDataset: 50 consecutive empty videos — check the data paths")
 
 
 class PairedDataset(Dataset):
@@ -278,15 +285,25 @@ class PairedDataset(Dataset):
         return len(self.items)
 
     def __getitem__(self, i):
-        orig_path, aug_dirs, label = self.items[i]
-        rng = random.Random((os.getpid() << 20) ^ (i << 4) ^ (int(time.time() * 1e3) & 0xFFFF))
-        orig = _sample_clip(_decode_mp4(orig_path), True, rng,
-                            self.orig_mode, self.frame_interval)
-        augs = [_sample_clip(_load_jpg_dir(d), True, rng, self.aug_mode, self.aug_frame_interval)
-                for d in aug_dirs]
-        return (torch.from_numpy(orig),
-                [torch.from_numpy(a) for a in augs],
-                label)
+        # Skip empty/corrupt originals; drop any aug variant that fails to load (don't crash).
+        for _ in range(50):
+            orig_path, aug_dirs, label = self.items[i]
+            frames = _decode_mp4(orig_path)
+            if frames:
+                rng = random.Random((os.getpid() << 20) ^ (i << 4) ^ (int(time.time() * 1e3) & 0xFFFF))
+                orig = _sample_clip(frames, True, rng, self.orig_mode, self.frame_interval)
+                augs = []
+                for d in aug_dirs:
+                    af = _load_jpg_dir(d)
+                    if af:
+                        augs.append(torch.from_numpy(
+                            _sample_clip(af, True, rng, self.aug_mode, self.aug_frame_interval)))
+                    else:
+                        print(f"[PairedDataset] WARNING: 0 aug frames, skipping {d}", flush=True)
+                return torch.from_numpy(orig), augs, label
+            print(f"[PairedDataset] WARNING: 0 frames, skipping {orig_path}", flush=True)
+            i = (i + 1) % len(self.items)
+        raise RuntimeError("PairedDataset: 50 consecutive empty originals — check the data paths")
 
 
 def paired_collate(batch):
@@ -491,6 +508,7 @@ class MLflowLogger:
     def __init__(self, enable, experiment, run_name, params):
         self.ok = False
         self.mlflow = None
+        self.run_id = None
         if not enable:
             return
         try:
@@ -498,7 +516,8 @@ class MLflowLogger:
             self.mlflow = mlflow
             mlflow.set_tracking_uri(_MLFLOW_TRACKING_URI)
             mlflow.set_experiment(experiment)
-            mlflow.start_run(run_name=run_name)
+            run = mlflow.start_run(run_name=run_name)
+            self.run_id = run.info.run_id
             mlflow.log_params({k: str(v) for k, v in params.items()})
             mlflow.set_tags({"kind": "backbone_ft",
                              "node": os.environ.get("SLURMD_NODENAME", "unknown"),
@@ -653,6 +672,13 @@ def main():
                 "train_csv": args.train_csv, "num_classes": args.num_classes,
                 "total_steps": total_steps, "n_train": len(ds)},
     )
+    # Expose the run_id so the SLURM job can attach the .txt log as an artifact at the end.
+    if mlf.run_id:
+        try:
+            with open(os.path.join(args.save_dir, "mlflow_run_id.txt"), "w") as f:
+                f.write(mlf.run_id)
+        except Exception:
+            pass
 
     gstep = 0
     n_pair_batches = 0
