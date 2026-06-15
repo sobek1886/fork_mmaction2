@@ -48,7 +48,7 @@ MEAN = np.array([140.99762122, 129.92701646, 125.25081198], dtype=np.float32)
 STD  = np.array([62.07248248,  62.94645644,  61.42221137],  dtype=np.float32)
 
 NUM_BLOCKS  = 16        # MViTv2-S has 16 transformer blocks (verified)
-AUG_NAMES   = ("glasses", "shirt_1")   # appearance-augmentation variants on disk
+AUG_NAMES   = ("glasses", "shirt_1", "signer_swap", "skin_mst_diffusion")  # aug variants on disk
 VIDEO_EXTS  = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
 

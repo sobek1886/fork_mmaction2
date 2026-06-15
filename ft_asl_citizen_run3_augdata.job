@@ -39,6 +39,7 @@ srun python train_logos_asl_citizen.py \
     --train_csv      $SPLITS_AUG/train.csv \
     --video_dir      $VIDEO_DIR \
     --aug_frames_dir $AUG_FRAMES \
+    --aug_names glasses shirt_1 signer_swap skin_mst_diffusion \
     --checkpoint     $CKPT \
     --save_dir       $SAVE_DIR \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD \
