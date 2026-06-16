@@ -62,6 +62,16 @@ def preprocess_frame(frame_rgb, mode):
                    mode="constant", constant_values=PAD_VALUE)
         off = (RESIZE - INPUT_SIZE) // 2
         f = f[off:off + INPUT_SIZE, off:off + INPUT_SIZE]
+    elif mode == "letterbox224":
+        # resize LONG side -> 224, pad short side to 224 (grey). Aspect-preserving AND
+        # keeps the whole frame (no crop) — avoids clipping hands at the sides.
+        h, w = frame_rgb.shape[:2]
+        scale = INPUT_SIZE / max(h, w)
+        nh, nw = int(round(h * scale)), int(round(w * scale))
+        f = cv2.resize(frame_rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        ph, pw = INPUT_SIZE - nh, INPUT_SIZE - nw
+        f = np.pad(f, ((ph // 2, ph - ph // 2), (pw // 2, pw - pw // 2), (0, 0)),
+                   mode="constant", constant_values=PAD_VALUE)
     else:
         raise ValueError(f"unknown preproc mode: {mode}")
     f = (f.astype(np.float32) - MEAN) / STD       # (H, W, 3)
@@ -209,12 +219,13 @@ def main():
                         help='CPU worker processes for video decoding')
     parser.add_argument('--batch_size',   type=int, default=64,
                         help='Clips per GPU forward pass')
-    parser.add_argument('--preproc', choices=['logos_native', 'direct224'],
+    parser.add_argument('--preproc', choices=['logos_native', 'direct224', 'letterbox224'],
                         default='logos_native',
-                        help='Frame preprocessing. logos_native = resize long side to 300, '
-                             'pad to 300x300 (grey 114), center-crop 224 (aspect-preserving, '
-                             'correct for non-square ASL-Citizen). direct224 = legacy square '
-                             'resize used by the old baseline/endanchor features.')
+                        help='Frame preprocessing. direct224 = resize whole frame to 224x224 '
+                             '(keeps all content, mild stretch; best in eval). letterbox224 = '
+                             'resize long side to 224 + grey-pad (keeps all, no distortion, '
+                             'smaller signer). logos_native = resize-300+pad+center-crop-224 '
+                             '(aspect-preserving but CLIPS hands at the sides on 4:3 frames).')
     parser.add_argument('--prefetch',     type=int, default=None,
                         help='Videos to prefetch (default: workers * 8)')
     parser.add_argument('--overwrite',    action='store_true')

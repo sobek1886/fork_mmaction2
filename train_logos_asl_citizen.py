@@ -116,6 +116,15 @@ def _preprocess_frame(frame, mode):
         y0 = (frame.shape[0] - INPUT_SIZE) // 2
         x0 = (frame.shape[1] - INPUT_SIZE) // 2
         frame = frame[y0:y0 + INPUT_SIZE, x0:x0 + INPUT_SIZE]
+    elif mode == "letterbox224":
+        # resize LONG side -> 224, pad short side to 224 (grey). Keeps whole frame, no crop.
+        h, w = frame.shape[:2]
+        scale = INPUT_SIZE / max(h, w)
+        nh, nw = int(round(h * scale)), int(round(w * scale))
+        frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        ph, pw = INPUT_SIZE - nh, INPUT_SIZE - nw
+        frame = np.pad(frame, ((ph // 2, ph - ph // 2), (pw // 2, pw - pw // 2), (0, 0)),
+                       mode="constant", constant_values=PAD_VALUE)
     else:
         raise ValueError(f"unknown preprocessing mode: {mode}")
     frame = (frame.astype(np.float32) - MEAN) / STD   # (H, W, 3)
@@ -589,10 +598,12 @@ def main():
     ap.add_argument("--num_classes", type=int, default=2731)
     ap.add_argument("--aug_names", nargs="+", default=list(AUG_NAMES))
     # preprocessing modes
-    ap.add_argument("--orig_preproc", choices=["logos_native", "direct224", "resize300crop"],
+    ap.add_argument("--orig_preproc",
+                    choices=["logos_native", "direct224", "letterbox224", "resize300crop"],
                     default="logos_native",
                     help="must match re-extraction (extract_logos_features.py --preproc)")
-    ap.add_argument("--aug_preproc", choices=["logos_native", "direct224", "resize300crop"],
+    ap.add_argument("--aug_preproc",
+                    choices=["logos_native", "direct224", "letterbox224", "resize300crop"],
                     default="logos_native")
     ap.add_argument("--frame_interval", type=int, default=FRAME_INTERVAL)
     ap.add_argument("--aug_frame_interval", type=int, default=FRAME_INTERVAL,

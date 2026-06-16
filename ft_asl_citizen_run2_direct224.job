@@ -1,0 +1,57 @@
+#!/bin/bash
+# Preprocessing comparison — baseline FT (CE, no aug) with DIRECT224 preprocessing.
+# Same as run2 but train + re-extract use --preproc direct224 (resize whole frame to 224x224,
+# keeps all content, mild stretch). Compare vs run2 (logos_native) and run2_letterbox224.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_run2_direct224
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=12:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+TAG=run2_direct224
+UNFREEZE=2
+LR=1e-3
+LLRD=1.0
+BATCH=16
+GRAD_ACCUM=1
+EPOCHS=10
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+SPLITS=$HOME/ASL_Citizen/splits
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+
+srun python train_logos_asl_citizen.py \
+    --train_csv  $SPLITS/train.csv \
+    --video_dir  $VIDEO_DIR \
+    --checkpoint $CKPT \
+    --save_dir   $SAVE_DIR \
+    --orig_preproc direct224 \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $HOME/ASL_Citizen/splits/val.csv
+
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc direct224 \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — eval via jobs/eval_asl_citizen_preproc.job."
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true
