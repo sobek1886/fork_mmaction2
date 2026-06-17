@@ -1,0 +1,63 @@
+#!/bin/bash
+# Middle-ground fine-tune: CONSISTENCY (CE + appearance-consistency, all 4 augs), unfreeze the
+# TOP 6 of 16 MViT blocks with layer-wise LR decay. The capacity-matched counterpart to
+# ft_asl_citizen_run2_mid.job — tests whether invariance helps when the backbone has more
+# capacity to reshape features than the top-2 partial FT. Preprocessing: direct224.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_run1_mid
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=14:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+TAG=run1_mid
+UNFREEZE=6
+LR=5e-4
+LLRD=0.75
+BATCH=6            # originals/item; + up to 4x augs per paired item
+GRAD_ACCUM=1
+EPOCHS=12
+LAMBDA_CONSIST=0.5
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+
+srun python train_logos_asl_citizen.py \
+    --train_csv      $SPLITS/train.csv \
+    --video_dir      $VIDEO_DIR \
+    --aug_frames_dir $AUG_FRAMES \
+    --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+    --checkpoint     $CKPT \
+    --save_dir       $SAVE_DIR \
+    --paired --lambda_consist $LAMBDA_CONSIST \
+    --orig_preproc direct224 --aug_preproc direct224 \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $HOME/ASL_Citizen/splits/val.csv
+
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc direct224 \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — eval via jobs/eval_asl_citizen_features.job."
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true

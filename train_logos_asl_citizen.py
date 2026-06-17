@@ -602,6 +602,9 @@ def main():
     ap.add_argument("--aug_frames_dir", default=None,
                     help="augmented_frames/ root ({video_id}/{aug_name}/*.jpg)")
     ap.add_argument("--checkpoint", required=True, help="logos_autsl_wlasl_model.pth")
+    ap.add_argument("--load_head", action="store_true",
+                    help="also resume the classification head from --checkpoint (two-stage: "
+                         "resume a converged run2 checkpoint instead of the Logos init)")
     ap.add_argument("--save_dir", required=True)
     ap.add_argument("--num_classes", type=int, default=2731)
     ap.add_argument("--aug_names", nargs="+", default=list(AUG_NAMES))
@@ -622,6 +625,10 @@ def main():
                     help="(paired) keep only videos that HAVE augmentations — guarantees the "
                          "consistency loss fires; used by the smoke test")
     ap.add_argument("--lambda_consist", type=float, default=0.5)
+    ap.add_argument("--cls_contrastive", action="store_true",
+                    help="(paired) use instance-level SupCon on the CLS token (original + its "
+                         "augs = positives, other videos = negatives, temperature-scaled) as the "
+                         "consistency term, instead of the cosine pull. Weighted by --lambda_consist.")
     ap.add_argument("--lambda_supcon", type=float, default=0.0)
     ap.add_argument("--supcon_temperature", type=float, default=0.07)
     # fine-tune extent
@@ -721,6 +728,15 @@ def main():
 
     # model
     model = LogosClassifier(args.checkpoint, args.num_classes, device)
+    if args.load_head:   # two-stage: resume the head too (not just the backbone)
+        _ck = torch.load(args.checkpoint, map_location="cpu")
+        _st = _ck.get("state_dict", _ck)
+        _head = {k[len("head."):]: v for k, v in _st.items() if k.startswith("head.")}
+        if _head:
+            model.head.load_state_dict(_head)
+            print(f"[two-stage] resumed head from {args.checkpoint}")
+        else:
+            print(f"[two-stage] WARNING: no head.* in {args.checkpoint}; head left fresh")
     set_trainable(model, args.unfreeze_blocks)
 
     steps_per_epoch = max(1, len(loader) // args.grad_accum)
@@ -801,8 +817,14 @@ def main():
                     loss = loss_ce
                     if M > 0:
                         owner = batch["aug_owner"].to(device, non_blocking=True)
-                        cos = F.cosine_similarity(feat[B:], feat[:B][owner], dim=-1)
-                        loss_consist = (1.0 - cos).mean()
+                        if args.cls_contrastive:
+                            # instance-level SupCon on the CLS token: orig + its augs = positives,
+                            # other videos in the batch = negatives (temperature-scaled).
+                            inst = torch.cat([torch.arange(B, device=device), owner], 0)
+                            loss_consist = supcon_loss(feat, inst, args.supcon_temperature)
+                        else:
+                            cos = F.cosine_similarity(feat[B:], feat[:B][owner], dim=-1)
+                            loss_consist = (1.0 - cos).mean()
                         loss = loss + args.lambda_consist * loss_consist
                         n_pair_batches += 1
                     else:
