@@ -49,6 +49,10 @@ STD  = np.array([62.07248248,  62.94645644,  61.42221137],  dtype=np.float32)
 
 NUM_BLOCKS  = 16        # MViTv2-S has 16 transformer blocks (verified)
 AUG_NAMES   = ("glasses", "shirt_1", "signer_swap", "skin_mst_diffusion")  # aug variants on disk
+# These variants were generated at STRIDE 2 (every 2nd original frame → half the frames),
+# so their clips must use HALF the aug_frame_interval to span the same #original frames as the
+# stride-1 augs (glasses/shirt_1) and the original. Otherwise their clips cover 2x the duration.
+STRIDE2_AUGS = ("signer_swap", "skin_mst_diffusion")
 VIDEO_EXTS  = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
 
@@ -216,7 +220,9 @@ class ClipDataset(Dataset):
                 if not fdir.is_dir():
                     missing += 1
                     continue
-                self.items.append(("frames", str(fdir), label, aug_frame_interval, aug_mode))
+                # stride-2 augs (half the frames) → interval 1 to span the same duration
+                fi = 1 if aug in STRIDE2_AUGS else aug_frame_interval
+                self.items.append(("frames", str(fdir), label, fi, aug_mode))
             if max_videos and len(self.items) >= max_videos:
                 break
         print(f"[ClipDataset] {csv_path}: {len(self.items)} items "
@@ -305,8 +311,10 @@ class PairedDataset(Dataset):
                 for d in aug_dirs:
                     af = _load_jpg_dir(d)
                     if af:
+                        # stride-2 augs (half the frames) → interval 1 to span the same duration
+                        fi = 1 if Path(d).name in STRIDE2_AUGS else self.aug_frame_interval
                         augs.append(torch.from_numpy(
-                            _sample_clip(af, True, rng, self.aug_mode, self.aug_frame_interval)))
+                            _sample_clip(af, True, rng, self.aug_mode, fi)))
                     else:
                         print(f"[PairedDataset] WARNING: 0 aug frames, skipping {d}", flush=True)
                 return torch.from_numpy(orig), augs, label
