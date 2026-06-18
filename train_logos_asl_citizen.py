@@ -488,7 +488,7 @@ def supcon_loss(feats, labels, temperature=0.07):
     sim = feats @ feats.T / temperature                       # (N,N)
     N = feats.size(0)
     self_mask = torch.eye(N, dtype=torch.bool, device=feats.device)
-    sim = sim.masked_fill(self_mask, -1e9)
+    sim = sim.masked_fill(self_mask, torch.finfo(sim.dtype).min)  # fp16-safe (-1e9 overflows half)
     pos = (labels.unsqueeze(0) == labels.unsqueeze(1)) & ~self_mask   # (N,N)
     log_prob = sim - torch.logsumexp(sim, dim=1, keepdim=True)
     pos_counts = pos.sum(1)

@@ -63,7 +63,7 @@ srun python extract_logos_features.py \
     --output_dir  $SMOKE/tiny_feats \
     --checkpoint  $SMOKE/ce/checkpoint_best.pt \
     --dataset_name asl_citizen \
-    --preproc logos_native \
+    --preproc logos_native --overwrite \
     --workers 4 --batch_size 4
 
 echo ""

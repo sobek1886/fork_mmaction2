@@ -55,7 +55,7 @@ srun python extract_logos_features.py \
     --output_dir  $FEAT_DIR \
     --checkpoint  $SAVE_DIR/checkpoint_best.pt \
     --dataset_name asl_citizen \
-    --preproc direct224 \
+    --preproc direct224 --overwrite \
     --workers 16 --batch_size 8
 
 echo "Done. Features in $FEAT_DIR — eval via jobs/eval_asl_citizen_features.job."
