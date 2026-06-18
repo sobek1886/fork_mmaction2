@@ -1,0 +1,45 @@
+#!/bin/bash
+# One-off: extract signer_swap + skin augmentation features for the appearance-invariance
+# diagnostic, with BOTH the no-FT Logos init (baseline) and run1's checkpoint.
+# Why both: the per-run training jobs only re-extract ORIGINALS, and the baseline's existing
+# signer/skin features (if any, in logos_features) may have been extracted at the default
+# interval 2 — wrong for these STRIDE-2 augs. Re-extracting both here at --frame_interval 1
+# (and the aug extractor's logos_native preproc) makes the comparison airtight: same stride,
+# same preproc, ONLY the checkpoint differs.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=extract_diag_aug
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+CKPT_BASE=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+CKPT_RUN1=/scratch-shared/psobecki/runs/asl_ft_run1/checkpoint_best.pt
+OUT_BASE=/scratch-shared/psobecki/ASL_Citizen/logos_features_baseline_aug
+OUT_RUN1=/scratch-shared/psobecki/ASL_Citizen/logos_features_run1_aug
+
+for pair in "baseline:$CKPT_BASE:$OUT_BASE" "run1:$CKPT_RUN1:$OUT_RUN1"; do
+    name=${pair%%:*}; rest=${pair#*:}; ckpt=${rest%%:*}; out=${rest#*:}
+    if [ ! -f "$ckpt" ]; then echo "== skip $name (no checkpoint $ckpt) =="; continue; fi
+    echo ""; echo "########## extract aug feats: $name → $out ##########"
+    srun python extract_logos_features_asl_citizen_aug.py \
+        --aug_dir        $AUG_FRAMES \
+        --output_dir     $out \
+        --checkpoint     $ckpt \
+        --aug_names      signer_swap skin_mst_diffusion \
+        --frame_interval 1 \
+        --workers 16 --batch_size 8 --overwrite
+done
+
+echo ""
+echo "Done. baseline augs → $OUT_BASE ; run1 augs → $OUT_RUN1"
+echo "Now run the diagnostic: sbatch jobs/diagnose_appearance.job (in the MMPT repo)."

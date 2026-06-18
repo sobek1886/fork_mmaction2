@@ -141,8 +141,12 @@ def gpu_inference(backbone, clips_np, device, batch_size):
     return np.concatenate(parts, axis=0)
 
 
-def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_interval: int):
-    """augmented_frames/{video_id}/{aug_name}/*.jpg → asl_citizen_{video_id}_{aug_name}.npy"""
+def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_interval: int,
+                    aug_names=None):
+    """augmented_frames/{video_id}/{aug_name}/*.jpg → asl_citizen_{video_id}_{aug_name}.npy
+
+    If aug_names is given, only those variant subdirs are extracted (the rest are skipped).
+    """
     work = []
     for video_id_dir in sorted(aug_dir.iterdir()):
         if not video_id_dir.is_dir():
@@ -154,6 +158,8 @@ def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_inte
             if not any(aug_dir_entry.glob('*.jpg')):
                 continue
             aug_name = aug_dir_entry.name   # e.g. "glasses"
+            if aug_names and aug_name not in aug_names:
+                continue
             key = f'asl_citizen_{video_id}_{aug_name}'
             out_path = output_dir / f'{key}.npy'
             work.append((str(aug_dir_entry), str(out_path), overwrite, frame_interval))
@@ -173,6 +179,9 @@ def main():
     parser.add_argument('--frame_interval', type=int, default=2,
                         help='Temporal stride between sampled frames (default 2). '
                              'Use 1 for augmentations generated with --stride 2.')
+    parser.add_argument('--aug_names', nargs='+', default=None,
+                        help='Only extract these variant subdirs (default: all present). '
+                             'e.g. --aug_names signer_swap skin_mst_diffusion')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
 
@@ -187,7 +196,8 @@ def main():
     print(f'Loading backbone from {args.checkpoint} ...')
     backbone = load_backbone(args.checkpoint, device)
 
-    work = build_work_list(aug_dir, output_dir, args.overwrite, args.frame_interval)
+    work = build_work_list(aug_dir, output_dir, args.overwrite, args.frame_interval,
+                           args.aug_names)
     print(f'Found {len(work)} augmented frame sequences to process')
 
     skipped = errors = done = 0
