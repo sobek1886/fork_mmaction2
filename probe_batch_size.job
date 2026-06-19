@@ -1,0 +1,65 @@
+#!/bin/bash
+# Find the REAL max batch size for the full-unfreeze gloss-contrastive run (the heaviest path:
+# all 16 blocks trainable + paired originals + augmentations). Tries increasing batch sizes,
+# runs 3 optimizer steps each, and reports FIT vs OOM. Whatever's the largest FIT is the ceiling
+# — set ft_asl_citizen_run_full_glosscon.job's BATCH to one notch below it (real batches carry a
+# variable number of augmentations, so leave headroom). This measures; it does not guess.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=probe_batch
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=01:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+
+SUMMARY=""
+for B in 8 16 24 32 48 64; do
+  echo ""
+  echo "==================================================================="
+  echo "  PROBE batch=$B  (full unfreeze + paired + gloss-balanced, 3 steps)"
+  echo "==================================================================="
+  srun python train_logos_asl_citizen.py \
+      --train_csv      $SPLITS/train.csv \
+      --video_dir      $VIDEO_DIR \
+      --aug_frames_dir $AUG_FRAMES \
+      --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+      --checkpoint     $CKPT \
+      --save_dir       /tmp/probe_b${B} \
+      --orig_preproc direct224 --aug_preproc direct224 \
+      --paired --gloss_balanced --per_gloss 2 --lambda_supcon 1.0 \
+      --unfreeze_blocks 16 --llrd 0.9 \
+      --batch_size $B --grad_accum 1 --lr 2e-4 \
+      --max_steps 3 --max_videos 2000 --workers 16 \
+      2>&1 | tail -6
+  rc=${PIPESTATUS[0]}
+  if [ "$rc" -eq 0 ]; then
+    echo ">>> batch $B : FIT"
+    SUMMARY="${SUMMARY}  batch ${B}: FIT
+"
+  else
+    echo ">>> batch $B : OOM/FAIL (exit $rc)"
+    SUMMARY="${SUMMARY}  batch ${B}: OOM/FAIL
+"
+  fi
+  rm -rf /tmp/probe_b${B}
+done
+
+echo ""
+echo "==================================================================="
+echo "SUMMARY (largest FIT = your ceiling; set the real job one notch below):"
+echo "$SUMMARY"
+echo "Note: probe uses a 2000-video subset; a full run's batches carry more"
+echo "augmentations on average, so keep a little headroom below the max FIT."
+echo "==================================================================="

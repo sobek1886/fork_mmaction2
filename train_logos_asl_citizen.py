@@ -37,7 +37,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 
 # ── Preprocessing constants (COPIED from extract_logos_features.py — KEEP IN SYNC) ──
 CLIP_LEN       = 32     # frames fed to MViTv2-S
@@ -345,6 +345,47 @@ def paired_collate(batch):
             "augs": augs, "aug_owner": aug_owner, "aug_labels": aug_labels}
 
 
+class GlossBalancedBatchSampler(Sampler):
+    """Class-balanced-by-gloss batches, so a gloss-level contrastive loss (supcon_loss with
+    gloss labels) always has same-gloss positives in the batch — with ~2731 glosses, random
+    batching almost never co-locates two videos of the same sign, and the term would be ~0.
+
+    Each batch = n_glosses × per_gloss indices: pick n_glosses glosses, then per_gloss videos
+    from each (with replacement if a gloss has fewer). n_glosses = batch_size // per_gloss.
+    Call set_epoch(e) each epoch for a fresh deterministic shuffle.
+    """
+
+    def __init__(self, labels, batch_size, per_gloss=4, seed=0):
+        self.by_gloss = {}
+        for i, y in enumerate(labels):
+            self.by_gloss.setdefault(int(y), []).append(i)
+        self.glosses = list(self.by_gloss.keys())
+        self.per_gloss = max(2, per_gloss)               # >=2 → every anchor has a positive
+        self.n_glosses = max(1, batch_size // self.per_gloss)
+        self.batch_size = self.n_glosses * self.per_gloss
+        self.num_batches = max(1, len(labels) // self.batch_size)
+        self.seed, self.epoch = seed, 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __len__(self):
+        return self.num_batches
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        n_g = min(self.n_glosses, len(self.glosses))
+        for _ in range(self.num_batches):
+            batch = []
+            for g in rng.sample(self.glosses, n_g):
+                pool = self.by_gloss[g]
+                if len(pool) >= self.per_gloss:
+                    batch.extend(rng.sample(pool, self.per_gloss))
+                else:
+                    batch.extend(rng.choice(pool) for _ in range(self.per_gloss))
+            yield batch
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Model
 # ──────────────────────────────────────────────────────────────────────────────
@@ -631,6 +672,12 @@ def main():
                          "consistency term, instead of the cosine pull. Weighted by --lambda_consist.")
     ap.add_argument("--lambda_supcon", type=float, default=0.0)
     ap.add_argument("--supcon_temperature", type=float, default=0.07)
+    ap.add_argument("--gloss_balanced", action="store_true",
+                    help="(paired) sample class-balanced batches by gloss so the gloss-level "
+                         "SupCon term (--lambda_supcon) sees same-gloss positives (across signers) "
+                         "and their augmentations. Use with --paired --lambda_supcon > 0.")
+    ap.add_argument("--per_gloss", type=int, default=4,
+                    help="videos per gloss in a gloss-balanced batch (n_glosses = batch//per_gloss)")
     # fine-tune extent
     ap.add_argument("--unfreeze_blocks", type=int, default=2,
                     help=f"top N of {NUM_BLOCKS} MViT blocks to unfreeze; >={NUM_BLOCKS} = full FT")
@@ -681,6 +728,11 @@ def main():
 
     if (args.paired or "splits_aug" in args.train_csv) and not args.aug_frames_dir:
         ap.error("--aug_frames_dir is required for --paired or splits_aug training")
+    if args.gloss_balanced and not args.paired:
+        ap.error("--gloss_balanced requires --paired (it batches PairedDataset items by gloss)")
+    if args.gloss_balanced and args.lambda_supcon <= 0:
+        print("[WARN] --gloss_balanced set but --lambda_supcon=0: the gloss positives won't be "
+              "used (only CE on a class-balanced batch). Set --lambda_supcon > 0.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and device.type == "cuda"
@@ -697,14 +749,24 @@ def main():
         json.dump(gloss_to_idx, f)
 
     # dataset / loader
+    gloss_sampler = None
     if args.paired:
         ds = PairedDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
                            args.orig_preproc, args.aug_preproc,
                            args.frame_interval, args.aug_frame_interval,
                            args.aug_names, args.max_videos, require_augs=args.require_augs)
-        loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                            num_workers=args.workers, collate_fn=paired_collate,
-                            drop_last=True, pin_memory=True)
+        if args.gloss_balanced:
+            gloss_sampler = GlossBalancedBatchSampler(
+                [it[2] for it in ds.items], args.batch_size, args.per_gloss, seed=0)
+            loader = DataLoader(ds, batch_sampler=gloss_sampler, num_workers=args.workers,
+                                collate_fn=paired_collate, pin_memory=True)
+            print(f"[gloss-balanced] {gloss_sampler.n_glosses} glosses x "
+                  f"{gloss_sampler.per_gloss}/gloss = batch {gloss_sampler.batch_size}, "
+                  f"{gloss_sampler.num_batches} batches/epoch")
+        else:
+            loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
+                                num_workers=args.workers, collate_fn=paired_collate,
+                                drop_last=True, pin_memory=True)
     else:
         ds = ClipDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
                          True, args.orig_preproc, args.aug_preproc,
@@ -788,6 +850,8 @@ def main():
 
     stop = False
     for epoch in range(args.epochs):
+        if gloss_sampler is not None:
+            gloss_sampler.set_epoch(epoch)
         set_train_mode(model, args.unfreeze_blocks)
         opt.zero_grad(set_to_none=True)
         running, seen = 0.0, 0
