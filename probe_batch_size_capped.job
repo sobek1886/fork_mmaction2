@@ -13,7 +13,7 @@
 # glosscon.job BATCH one notch below it. With the cap, the freed memory should let BATCH rise well
 # above the old 6 — more distinct glosses = more SupCon negatives, which is the point of that run.
 
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=probe_batch_capped
 #SBATCH --ntasks=1
