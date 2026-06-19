@@ -30,13 +30,21 @@ module load 2025
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
 export PYTHONUNBUFFERED=1
+# Reduce allocator fragmentation (the capped probe showed FITs with several GB free that still
+# failed on one large contiguous block).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 TAG=run_full_glosscon
 UNFREEZE=16
 LR=2e-4
 LLRD=0.9
-BATCH=6              # = n_glosses(3) × per_gloss(2) origs + their augs; raise if memory allows
+# Forward size is now bounded: B originals + at most B*MAXAUG augs. With MAXAUG=1 the augs are
+# mostly redundant same-gloss positives, so capping them frees memory for MORE distinct glosses
+# (= more SupCon negatives, the scarce resource). Set BATCH from probe_batch_size_capped.job
+# (largest FIT one notch down, leaving headroom on peak_GPU_GB).
+BATCH=6
 PER_GLOSS=2
+MAXAUG=1
 LAMBDA_SUPCON=1.0
 EPOCHS=10
 
@@ -57,6 +65,7 @@ srun python train_logos_asl_citizen.py \
     --save_dir       $SAVE_DIR \
     --orig_preproc direct224 --aug_preproc direct224 \
     --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon $LAMBDA_SUPCON \
+    --max_augs_per_item $MAXAUG \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum 1 --lr $LR \
     --workers 16 \

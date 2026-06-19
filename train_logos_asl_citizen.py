@@ -264,10 +264,11 @@ class PairedDataset(Dataset):
 
     def __init__(self, csv_path, video_dir, aug_frames_dir, gloss_to_idx,
                  orig_mode, aug_mode, frame_interval, aug_frame_interval,
-                 aug_names, max_videos=None, require_augs=False):
+                 aug_names, max_videos=None, require_augs=False, max_augs_per_item=None):
         self.video_dir = video_dir
         self.orig_mode, self.aug_mode = orig_mode, aug_mode
         self.frame_interval, self.aug_frame_interval = frame_interval, aug_frame_interval
+        self.max_augs = max_augs_per_item   # cap augs/orig brought into the batch (None = all)
         self.items = []   # (orig_path, [aug_frame_dirs], label)
         n_with_aug = 0
         missing = 0
@@ -307,8 +308,14 @@ class PairedDataset(Dataset):
             if frames:
                 rng = random.Random((os.getpid() << 20) ^ (i << 4) ^ (int(time.time() * 1e3) & 0xFFFF))
                 orig = _sample_clip(frames, True, rng, self.orig_mode, self.frame_interval)
+                # Optionally cap how many augs join the batch (randomly chosen each call, so all
+                # variants are still seen across steps). Bounds the forward size B+M; for the
+                # gloss-SupCon run this frees memory for more distinct glosses (negatives).
+                sel_dirs = aug_dirs
+                if self.max_augs is not None and len(sel_dirs) > self.max_augs:
+                    sel_dirs = rng.sample(aug_dirs, self.max_augs)
                 augs = []
-                for d in aug_dirs:
+                for d in sel_dirs:
                     af = _load_jpg_dir(d)
                     if af:
                         # stride-2 augs (half the frames) → interval 1 to span the same duration
@@ -416,13 +423,16 @@ def load_backbone_trainable(checkpoint_path, device):
 class LogosClassifier(nn.Module):
     """MViTv2-S backbone + new linear classification head. forward → (feat_768, logits)."""
 
-    def __init__(self, checkpoint, num_classes, device):
+    def __init__(self, checkpoint, num_classes, device, disc_hidden=256):
         super().__init__()
         self.backbone = load_backbone_trainable(checkpoint, device)
         self.head = nn.Linear(768, num_classes)
         nn.init.trunc_normal_(self.head.weight, std=0.02)
         nn.init.zeros_(self.head.bias)
         self.head.to(device)
+        # SDDA domain discriminator (only used when --lambda_disc > 0; never checkpointed,
+        # so the unmodified extractor still round-trips backbone.*/head.* only).
+        self.discriminator = DomainDiscriminator(768, disc_hidden).to(device)
 
     def _pool(self, feat):
         while isinstance(feat, (list, tuple)):
@@ -538,6 +548,43 @@ def supcon_loss(feats, labels, temperature=0.07):
         return feats.new_zeros(())
     mean_log_prob_pos = (pos * log_prob).sum(1)[valid] / pos_counts[valid]
     return -mean_log_prob_pos.mean()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SDDA losses (Fu et al. 2024): KL-consistency + domain discrimination with a
+# gradient-reversal layer, to learn signer-invariant features from orig+aug pairs.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _GradReverse(torch.autograd.Function):
+    """Gradient-reversal layer (Ganin & Lempitsky 2015): identity forward, sign-flipped
+    (and scaled) gradient backward — turns a domain classifier into an adversary that
+    pushes the backbone toward orig/aug-indistinguishable (signer-invariant) features."""
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None
+
+
+def grad_reverse(x, lambd=1.0):
+    return _GradReverse.apply(x, lambd)
+
+
+class DomainDiscriminator(nn.Module):
+    """Tiny 2-layer MLP classifying a CLS feature as original (1) vs augmented (0).
+    Used behind a gradient-reversal layer for the SDDA discrimination loss (Eq. 7)."""
+
+    def __init__(self, in_dim=768, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(inplace=True), nn.Linear(hidden, 2))
+
+    def forward(self, x):
+        return self.net(x)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -678,6 +725,23 @@ def main():
                          "and their augmentations. Use with --paired --lambda_supcon > 0.")
     ap.add_argument("--per_gloss", type=int, default=4,
                     help="videos per gloss in a gloss-balanced batch (n_glosses = batch//per_gloss)")
+    ap.add_argument("--max_augs_per_item", type=int, default=None,
+                    help="(paired) cap the number of augmentation clips brought into the batch per "
+                         "original, randomly sampled each step (so all variants are still seen over "
+                         "training). Bounds the forward size B+M → deterministic memory; for the "
+                         "gloss-SupCon run, frees memory to fit more distinct glosses (negatives). "
+                         "Default: no cap (use every present aug).")
+    # SDDA losses (Fu et al. 2024) — both require --paired (need orig+aug in the batch)
+    ap.add_argument("--lambda_kl", type=float, default=0.0,
+                    help="(paired) weight (alpha) of the KL-consistency loss between an original "
+                         "and its augmentation's gloss output distributions (SDDA Eq. 6). Paper: 1.0")
+    ap.add_argument("--lambda_disc", type=float, default=0.0,
+                    help="(paired) weight (beta) of the GRL domain-discrimination loss on the CLS "
+                         "token, making orig/aug indistinguishable (SDDA Eq. 7). Paper: 1e-4")
+    ap.add_argument("--grl_lambda", type=float, default=1.0,
+                    help="gradient-reversal strength for the discrimination loss")
+    ap.add_argument("--disc_hidden", type=int, default=256,
+                    help="hidden width of the SDDA domain discriminator MLP")
     # fine-tune extent
     ap.add_argument("--unfreeze_blocks", type=int, default=2,
                     help=f"top N of {NUM_BLOCKS} MViT blocks to unfreeze; >={NUM_BLOCKS} = full FT")
@@ -733,6 +797,8 @@ def main():
     if args.gloss_balanced and args.lambda_supcon <= 0:
         print("[WARN] --gloss_balanced set but --lambda_supcon=0: the gloss positives won't be "
               "used (only CE on a class-balanced batch). Set --lambda_supcon > 0.")
+    if (args.lambda_kl > 0 or args.lambda_disc > 0) and not args.paired:
+        ap.error("--lambda_kl / --lambda_disc (SDDA losses) require --paired (need orig+aug pairs)")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = (not args.no_amp) and device.type == "cuda"
@@ -754,7 +820,8 @@ def main():
         ds = PairedDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
                            args.orig_preproc, args.aug_preproc,
                            args.frame_interval, args.aug_frame_interval,
-                           args.aug_names, args.max_videos, require_augs=args.require_augs)
+                           args.aug_names, args.max_videos, require_augs=args.require_augs,
+                           max_augs_per_item=args.max_augs_per_item)
         if args.gloss_balanced:
             gloss_sampler = GlossBalancedBatchSampler(
                 [it[2] for it in ds.items], args.batch_size, args.per_gloss, seed=0)
@@ -789,7 +856,7 @@ def main():
                                     num_workers=args.workers, pin_memory=True)
 
     # model
-    model = LogosClassifier(args.checkpoint, args.num_classes, device)
+    model = LogosClassifier(args.checkpoint, args.num_classes, device, disc_hidden=args.disc_hidden)
     if args.load_head:   # two-stage: resume the head too (not just the backbone)
         _ck = torch.load(args.checkpoint, map_location="cpu")
         _st = _ck.get("state_dict", _ck)
@@ -806,6 +873,9 @@ def main():
     warmup_steps = int(total_steps * args.warmup_frac)
 
     param_groups = build_param_groups(model, args.lr, args.llrd, args.weight_decay)
+    if args.lambda_disc > 0:   # SDDA discriminator (fresh head, no LLRD)
+        param_groups.append({"params": list(model.discriminator.parameters()),
+                             "lr": args.lr, "weight_decay": args.weight_decay})
     base_lrs = [g["lr"] for g in param_groups]
     opt = torch.optim.AdamW(param_groups, betas=(0.9, 0.98))
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -817,7 +887,9 @@ def main():
         args.mlflow, args.mlflow_experiment,
         args.mlflow_run_name or os.path.basename(os.path.normpath(args.save_dir)),
         params={"paired": args.paired, "lambda_consist": args.lambda_consist,
-                "lambda_supcon": args.lambda_supcon, "unfreeze_blocks": args.unfreeze_blocks,
+                "lambda_supcon": args.lambda_supcon, "lambda_kl": args.lambda_kl,
+                "lambda_disc": args.lambda_disc, "grl_lambda": args.grl_lambda,
+                "unfreeze_blocks": args.unfreeze_blocks,
                 "llrd": args.llrd, "lr": args.lr, "weight_decay": args.weight_decay,
                 "epochs": args.epochs, "batch_size": args.batch_size,
                 "grad_accum": args.grad_accum, "aug_names": ",".join(args.aug_names),
@@ -835,6 +907,7 @@ def main():
 
     gstep = 0
     n_pair_batches = 0
+    max_fwd_n = 0   # largest forward size B+M seen (for memory probing)
     best_val = -1.0
     best_path = os.path.join(args.save_dir, "checkpoint_best.pt")
     last_path = os.path.join(args.save_dir, "checkpoint_last.pt")
@@ -871,6 +944,7 @@ def main():
                         x = torch.cat([orig, batch["augs"].to(device, non_blocking=True)], 0)
                     else:
                         x = orig
+                    cur_fwd_n = x.size(0)   # B + M actually pushed through the backbone
                     feat, logits = model(x)
                     if M > 0:
                         labels_all = torch.cat(
@@ -879,6 +953,7 @@ def main():
                         labels_all = labels
                     loss_ce = ce(logits, labels_all)
                     loss = loss_ce
+                    loss_kl = loss_disc = torch.zeros((), device=device)
                     if M > 0:
                         owner = batch["aug_owner"].to(device, non_blocking=True)
                         if args.cls_contrastive:
@@ -891,6 +966,20 @@ def main():
                             loss_consist = (1.0 - cos).mean()
                         loss = loss + args.lambda_consist * loss_consist
                         n_pair_batches += 1
+                        if args.lambda_kl > 0:
+                            # SDDA L_KL: pull each aug's gloss distribution to its source's.
+                            p_orig = F.softmax(logits[:B][owner].float(), dim=1)
+                            logp_aug = F.log_softmax(logits[B:].float(), dim=1)
+                            loss_kl = F.kl_div(logp_aug, p_orig, reduction="batchmean")
+                            loss = loss + args.lambda_kl * loss_kl
+                        if args.lambda_disc > 0:
+                            # SDDA L_d: GRL domain discrimination on the CLS token (orig=1/aug=0).
+                            d_logits = model.discriminator(grad_reverse(feat, args.grl_lambda))
+                            domain = torch.cat([
+                                torch.ones(B, dtype=torch.long, device=device),
+                                torch.zeros(M, dtype=torch.long, device=device)], 0)
+                            loss_disc = F.cross_entropy(d_logits, domain)
+                            loss = loss + args.lambda_disc * loss_disc
                     else:
                         loss_consist = torch.zeros((), device=device)
                     if args.lambda_supcon > 0:
@@ -900,6 +989,7 @@ def main():
                     clips, labels = batch
                     clips = clips.to(device, non_blocking=True)
                     labels = labels.to(device, non_blocking=True)
+                    cur_fwd_n = clips.size(0)
                     feat, logits = model(clips)
                     loss_ce = ce(logits, labels)
                     loss = loss_ce
@@ -911,6 +1001,7 @@ def main():
                 loss = loss / args.grad_accum
 
             scaler.scale(loss).backward()
+            max_fwd_n = max(max_fwd_n, cur_fwd_n)
 
             if (it + 1) % args.grad_accum == 0:
                 if args.clip_grad:
@@ -926,13 +1017,19 @@ def main():
                 if gstep % args.log_interval == 0:
                     ce_avg = running / seen
                     cur_lr = base_lrs[0] * lr_scale
+                    peak_gb = (torch.cuda.max_memory_allocated() / 1e9
+                               if device.type == "cuda" else 0.0)
                     print(f"ep{epoch} step{gstep}/{total_steps} "
                           f"ce={ce_avg:.4f} consist={loss_consist.item():.4f} "
-                          f"lr={cur_lr:.2e} "
+                          f"lr={cur_lr:.2e} N={cur_fwd_n} peakGB={peak_gb:.1f} "
                           f"{seen*args.batch_size/(time.time()-t0):.1f} clip/s", flush=True)
                     logd = {"train_ce": ce_avg, "lr": cur_lr, "epoch": epoch}
                     if args.paired:                       # consist is only meaningful when paired
                         logd["consist"] = loss_consist.item()
+                    if args.paired and args.lambda_kl > 0:
+                        logd["kl"] = loss_kl.item()
+                    if args.paired and args.lambda_disc > 0:
+                        logd["disc"] = loss_disc.item()
                     mlf.log(logd, step=gstep)
                     running, seen, t0 = 0.0, 0, time.time()
 
@@ -967,6 +1064,9 @@ def main():
     if args.paired:
         print(f"batches with ≥1 aug pair: {n_pair_batches}")
         mlf.log({"n_pair_batches": n_pair_batches}, step=gstep)
+    if device.type == "cuda":   # one greppable line for the batch-size probe
+        print(f"PROBE_RESULT steps={gstep} max_fwd_N={max_fwd_n} "
+              f"peak_GPU_GB={torch.cuda.max_memory_allocated() / 1e9:.2f}", flush=True)
     mlf.log_artifact_file(args.slurm_log)   # final training-log snapshot
     mlf.end()
     print(f"Done. Checkpoints in {args.save_dir}")

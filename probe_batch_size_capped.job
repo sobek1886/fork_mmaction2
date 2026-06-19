@@ -1,0 +1,83 @@
+#!/bin/bash
+# Find the REAL max batch size for the gloss-SupCon run with the AUGMENTATION CAP in place
+# (--max_augs_per_item 1). The previous probe (probe_batch_size.job) was unreadable because the
+# forward size was B + M with M up to 4*B random augmentations: even batch 8 OOM'd, and the
+# crash memory was non-monotonic (a 3-step probe samples only 3 random M draws). Capping augs to
+# 1/original bounds the forward to B + (<=B) clips, so memory is deterministic and the sweep means
+# something. We also:
+#   * set expandable_segments to kill the fragmentation failures (free-but-not-contiguous OOMs),
+#   * run MORE steps (so we sample many gloss/aug draws, not 3), log EVERY step, and
+#   * print a greppable PROBE_RESULT line (max forward N + peak GPU GB) so you size from MEASURED
+#     peak memory, not just FIT/OOM.
+# Largest FIT with comfortable peak_GPU_GB headroom = your ceiling; set ft_asl_citizen_run_full_-
+# glosscon.job BATCH one notch below it. With the cap, the freed memory should let BATCH rise well
+# above the old 6 — more distinct glosses = more SupCon negatives, which is the point of that run.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=probe_batch_capped
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=01:30:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+
+MAXAUG=1            # must match ft_asl_citizen_run_full_glosscon.job
+PER_GLOSS=2
+PROBE_STEPS=30     # sample many random gloss/aug draws so worst-case M is seen (not just 3)
+
+SUMMARY=""
+# With MAXAUG=1 the forward is ~2*B, vs up to 5*B uncapped — so we can probe much higher than the
+# old floor of 8. Values past the ceiling are kept to confirm where OOM kicks in.
+for B in 8 12 16 20 24 32 48; do
+  echo ""
+  echo "==================================================================="
+  echo "  PROBE batch=$B  (full unfreeze + paired + gloss-balanced, cap=$MAXAUG, $PROBE_STEPS steps)"
+  echo "==================================================================="
+  OUT=/tmp/probe_cap_b${B}.log
+  srun python train_logos_asl_citizen.py \
+      --train_csv      $SPLITS/train.csv \
+      --video_dir      $VIDEO_DIR \
+      --aug_frames_dir $AUG_FRAMES \
+      --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+      --checkpoint     $CKPT \
+      --save_dir       /tmp/probe_cap_b${B} \
+      --orig_preproc direct224 --aug_preproc direct224 \
+      --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon 1.0 \
+      --max_augs_per_item $MAXAUG \
+      --unfreeze_blocks 16 --llrd 0.9 \
+      --batch_size $B --grad_accum 1 --lr 2e-4 \
+      --max_steps $PROBE_STEPS --max_videos 2000 --workers 16 --log_interval 1 \
+      2>&1 | tee "$OUT" | tail -8
+  rc=${PIPESTATUS[0]}
+  res=$(grep -m1 PROBE_RESULT "$OUT" | sed 's/PROBE_RESULT //')
+  if [ "$rc" -eq 0 ]; then
+    echo ">>> batch $B : FIT   ($res)"
+    SUMMARY="${SUMMARY}  batch ${B}: FIT   ${res}
+"
+  else
+    echo ">>> batch $B : OOM/FAIL (exit $rc)"
+    SUMMARY="${SUMMARY}  batch ${B}: OOM/FAIL
+"
+  fi
+  rm -rf /tmp/probe_cap_b${B} "$OUT"
+done
+
+echo ""
+echo "==================================================================="
+echo "SUMMARY (pick the largest FIT whose peak_GPU_GB leaves headroom under 40 GB):"
+echo "$SUMMARY"
+echo "max_fwd_N = largest B+M actually pushed through the backbone (deterministic now, = ~2*B)."
+echo "Set ft_asl_citizen_run_full_glosscon.job BATCH one notch below your chosen FIT."
+echo "==================================================================="

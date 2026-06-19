@@ -1,0 +1,64 @@
+#!/bin/bash
+# SDDA losses (Fu et al. 2024) on the Logos backbone: cross-entropy + KL-consistency (alpha=1.0)
+# + GRL domain-discrimination (beta=1e-4), on original+augmentation pairs. Matched to run1
+# (paired, top-2 unfreeze, direct224, 4 aug variants) but with the SDDA losses instead of the
+# cosine consistency — so "SDDA vs cosine-consistency vs plain CE" is a clean comparison at equal
+# depth. Set --lambda_kl / --lambda_disc independently for the paper's KL-only / disc-only ablations.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_run_sdda
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=14:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+TAG=run_sdda
+UNFREEZE=2
+LR=1e-4
+BATCH=8
+GRAD_ACCUM=1
+EPOCHS=10
+LAMBDA_KL=1.0       # alpha (SDDA Eq. 6)
+LAMBDA_DISC=1e-4    # beta  (SDDA Eq. 7)
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+
+srun python train_logos_asl_citizen.py \
+    --train_csv      $SPLITS/train.csv \
+    --video_dir      $VIDEO_DIR \
+    --aug_frames_dir $AUG_FRAMES \
+    --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+    --checkpoint     $CKPT \
+    --save_dir       $SAVE_DIR \
+    --orig_preproc direct224 --aug_preproc direct224 \
+    --paired --lambda_consist 0 --lambda_kl $LAMBDA_KL --lambda_disc $LAMBDA_DISC \
+    --unfreeze_blocks $UNFREEZE \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $HOME/ASL_Citizen/splits/val.csv
+
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc direct224 --overwrite \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — 'run_sdda' is registered in eval_asl_citizen_features.job."
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true
