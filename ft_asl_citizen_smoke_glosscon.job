@@ -1,0 +1,71 @@
+#!/bin/bash
+# Smoke test for the NEW code paths only (the full glosscon recipe is otherwise covered by
+# ft_asl_citizen_smoke.job). Tiny + cheap (~10 min on A100). Verifies, before the batch-size probe:
+#   1) --grad_checkpointing: blocks get wrapped ("[grad_checkpointing] wrapped 16 MViT blocks")
+#      and a full unfreeze forward+backward+step runs under checkpointing without crashing.
+#   2) --max_augs_per_item 1 + --gloss_balanced + --lambda_supcon: the capped paired/gloss-SupCon
+#      path runs, augs fire (n_pair_batches>0), and N stays bounded (the PROBE_RESULT max_fwd_N
+#      line should be <= 2*batch).
+#   3) checkpoint_best/last.pt are written and re-extract cleanly (checkpointed weights round-trip).
+# Runs full unfreeze at the smoke batch (2), which fits the 40 GB A100 (N<=4 ~ 14 GB), so no H100
+# needed just to smoke-test. Green here => probe_batch_size_ckpt.job is safe to submit.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_smoke_glosscon
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=00:20:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+SMOKE=/scratch-shared/psobecki/runs/asl_ft_smoke_glosscon
+
+echo "########## glosscon + checkpointing + aug-cap (full unfreeze, smoke) ##########"
+srun python train_logos_asl_citizen.py --smoke --paired --require_augs \
+    --train_csv      $SPLITS/train.csv \
+    --video_dir      $VIDEO_DIR \
+    --aug_frames_dir $AUG_FRAMES \
+    --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+    --checkpoint     $CKPT \
+    --save_dir       $SMOKE/run \
+    --orig_preproc direct224 --aug_preproc direct224 \
+    --gloss_balanced --per_gloss 2 --lambda_supcon 1.0 \
+    --max_augs_per_item 1 \
+    --unfreeze_blocks 16 --llrd 0.9 --grad_checkpointing \
+    --lr 2e-4
+
+echo ""
+echo "########## re-extract round-trip from checkpoint_best.pt (2 videos) ##########"
+TINY=$SMOKE/tiny_videos
+rm -rf "$TINY"; mkdir -p "$TINY"
+find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | head -2 | while read -r f; do ln -sf "$f" "$TINY/"; done
+srun python extract_logos_features.py \
+    --video_dir   "$TINY" \
+    --output_dir  $SMOKE/tiny_feats \
+    --checkpoint  $SMOKE/run/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc direct224 --overwrite \
+    --workers 4 --batch_size 2
+
+echo ""
+echo "########## result ##########"
+ls -la $SMOKE/run $SMOKE/tiny_feats
+
+echo ""
+echo "PASS if ALL of:"
+echo "  - log shows '[grad_checkpointing] wrapped 16 MViT blocks ...'"
+echo "  - log shows a 'PROBE_RESULT steps=.. max_fwd_N=.. peak_GPU_GB=..' line (max_fwd_N <= 4)"
+echo "  - log shows 'batches with >=1 aug pair: N' with N>0"
+echo "  - checkpoint_best.pt AND checkpoint_last.pt exist in run/"
+echo "  - .npy files exist in tiny_feats/ (checkpointed weights re-extract cleanly)"

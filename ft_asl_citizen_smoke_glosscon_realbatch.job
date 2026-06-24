@@ -1,0 +1,88 @@
+#!/bin/bash
+# REAL-BATCH smoke for the glosscon run: same recipe and batch you'll actually train with
+# (full unfreeze + paired + gloss-balanced SupCon + aug-cap + checkpointing, BATCH=16 on H100),
+# but short (--max_steps, --max_videos) so it's cheap. NOT --smoke (that would force batch=2) —
+# the whole point is to exercise the real memory footprint at the real batch size. This is
+# effectively a single-point batch-size probe for BATCH=16+checkpointing.
+#
+# Verifies before committing to the full run:
+#   1) [grad_checkpointing] wraps 16 blocks and a full-unfreeze fwd+bwd+step runs at BATCH=16.
+#   2) It FITS: watch peakGB per step; worst case here is N=2*BATCH=32 (~? GB). The PROBE_RESULT
+#      line reports max_fwd_N actually seen + peak_GPU_GB. If max_fwd_N reaches ~32 and it didn't
+#      OOM, the real run is safe; if max_fwd_N stayed < 32, the worst case wasn't hit (run more
+#      steps or treat peak as a lower bound).
+#   3) Validation runs (checkpointing auto-disables under no_grad) and checkpoint_best/last save.
+#   4) Checkpointed weights re-extract cleanly.
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=ft_asl_smoke_glosscon_rb
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:40:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# --- mirror ft_asl_citizen_run_full_glosscon.job ---
+BATCH=16
+PER_GLOSS=2
+MAXAUG=1
+UNFREEZE=16
+LLRD=0.9
+LR=2e-4
+# --- smoke knobs (short, but real batch) ---
+STEPS=25            # enough draws to likely hit a near-worst-case (N up to 2*BATCH) batch
+TRAIN_VIDEOS=1500   # subset for variety in the gloss-balanced sampler
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+SMOKE=/scratch-shared/psobecki/runs/asl_ft_smoke_glosscon_rb
+
+echo "########## glosscon real-batch smoke: BATCH=$BATCH + checkpointing (full unfreeze) ##########"
+srun python train_logos_asl_citizen.py --paired \
+    --train_csv      $SPLITS/train.csv \
+    --video_dir      $VIDEO_DIR \
+    --aug_frames_dir $AUG_FRAMES \
+    --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+    --checkpoint     $CKPT \
+    --save_dir       $SMOKE/run \
+    --orig_preproc direct224 --aug_preproc direct224 \
+    --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon 1.0 \
+    --max_augs_per_item $MAXAUG \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD --grad_checkpointing \
+    --epochs 1 --batch_size $BATCH --grad_accum 1 --lr $LR \
+    --max_steps $STEPS --max_videos $TRAIN_VIDEOS --workers 16 --log_interval 1 \
+    --val_csv $SPLITS/val.csv --val_max_videos 40
+
+echo ""
+echo "########## re-extract round-trip from checkpoint_best.pt (2 videos) ##########"
+TINY=$SMOKE/tiny_videos
+rm -rf "$TINY"; mkdir -p "$TINY"
+find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | head -2 | while read -r f; do ln -sf "$f" "$TINY/"; done
+srun python extract_logos_features.py \
+    --video_dir   "$TINY" \
+    --output_dir  $SMOKE/tiny_feats \
+    --checkpoint  $SMOKE/run/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc direct224 --overwrite \
+    --workers 4 --batch_size 2
+
+echo ""
+echo "########## result ##########"
+ls -la $SMOKE/run $SMOKE/tiny_feats
+
+echo ""
+echo "PASS if ALL of:"
+echo "  - log shows '[grad_checkpointing] wrapped 16 MViT blocks ...'"
+echo "  - NO CUDA OOM; per-step 'peakGB=' stabilises below ~90 GB"
+echo "  - 'PROBE_RESULT ... max_fwd_N=.. peak_GPU_GB=..' printed (note whether max_fwd_N reached ~32)"
+echo "  - '[val] epoch 0: ce=.. top1=.. top5=..' line (validation ran under checkpointing-off)"
+echo "  - checkpoint_best.pt + checkpoint_last.pt in run/, and .npy files in tiny_feats/"
