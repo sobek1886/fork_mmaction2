@@ -849,6 +849,14 @@ def main():
         json.dump(gloss_to_idx, f)
 
     # dataset / loader
+    # Keep workers alive across epochs (pay decode-pipeline warm-up once, not every epoch) and
+    # deepen the prefetch buffer to ride over per-video decode jitter. Both are only valid with
+    # num_workers > 0. This is the main insurance against the data-loading stalls that timed out
+    # earlier paired runs; it smooths throughput but does not raise the max decode rate.
+    loader_kw = dict(num_workers=args.workers, pin_memory=True)
+    if args.workers > 0:
+        loader_kw["persistent_workers"] = True
+        loader_kw["prefetch_factor"] = 4
     gloss_sampler = None
     if args.paired:
         ds = PairedDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
@@ -859,22 +867,21 @@ def main():
         if args.gloss_balanced:
             gloss_sampler = GlossBalancedBatchSampler(
                 [it[2] for it in ds.items], args.batch_size, args.per_gloss, seed=0)
-            loader = DataLoader(ds, batch_sampler=gloss_sampler, num_workers=args.workers,
-                                collate_fn=paired_collate, pin_memory=True)
+            loader = DataLoader(ds, batch_sampler=gloss_sampler,
+                                collate_fn=paired_collate, **loader_kw)
             print(f"[gloss-balanced] {gloss_sampler.n_glosses} glosses x "
                   f"{gloss_sampler.per_gloss}/gloss = batch {gloss_sampler.batch_size}, "
                   f"{gloss_sampler.num_batches} batches/epoch")
         else:
             loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                                num_workers=args.workers, collate_fn=paired_collate,
-                                drop_last=True, pin_memory=True)
+                                collate_fn=paired_collate, drop_last=True, **loader_kw)
     else:
         ds = ClipDataset(args.train_csv, args.video_dir, args.aug_frames_dir, gloss_to_idx,
                          True, args.orig_preproc, args.aug_preproc,
                          args.frame_interval, args.aug_frame_interval,
                          args.aug_names, args.max_videos)
         loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                            num_workers=args.workers, drop_last=True, pin_memory=True)
+                            drop_last=True, **loader_kw)
     if len(ds) == 0:
         raise RuntimeError("empty dataset — check paths/splits")
 
@@ -887,7 +894,7 @@ def main():
                              args.aug_names, args.val_max_videos)
         if len(val_ds) > 0:
             val_loader = DataLoader(val_ds, batch_size=args.val_batch_size, shuffle=False,
-                                    num_workers=args.workers, pin_memory=True)
+                                    **loader_kw)
 
     # model
     model = LogosClassifier(args.checkpoint, args.num_classes, device,

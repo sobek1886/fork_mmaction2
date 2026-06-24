@@ -40,14 +40,16 @@ TAG=run_full_glosscon
 UNFREEZE=16
 LR=2e-4
 LLRD=0.9
-# Forward size is now bounded: B originals + at most B*MAXAUG augs. With MAXAUG=1 the augs are
-# mostly redundant same-gloss positives, so capping them frees memory for MORE distinct glosses
+# Forward size is bounded: B originals + at most B*MAXAUG augs. With MAXAUG=1 the augs are mostly
+# redundant same-gloss positives, so capping them frees memory for MORE distinct glosses
 # (= more SupCon negatives, the scarce resource).
-# Sizing (from probe_batch_size_capped.job on H100, ~3.42 GB/clip): peak must hold the WORST case
-# N = 2*B (every original drawing its aug), not the probe's observed max. 2*B=24 → ~83 GB (fits
-# 94 GB with headroom); 2*B=28 → ~96 GB (OOM). So BATCH=12 is the ceiling. (The probe's "FIT" at
-# 16 was luck — it never drew a full-aug batch in 30 steps; a 10-epoch run would, and OOM.)
-BATCH=12
+# Sizing with GRAD CHECKPOINTING on (smoke ft_asl_citizen_smoke_glosscon_realbatch.job): activation
+# cost drops to ~1.4 GB/clip (vs 3.42 without), so worst-case N=2*B is cheap:
+#   B=16 → N=32 → ~48 GB  | B=24 → N=48 → ~72 GB  | B=28 → N=56 → ~84 GB (tight) on the 94 GB H100.
+# B=24 (12 glosses/batch) for more SupCon negatives; worst-case N=48 → ~72 GB leaves comfortable
+# headroom on the 94 GB H100. (Without --grad_checkpointing the ceiling would be ~12; do not drop
+# the flag without re-sizing.)
+BATCH=24
 PER_GLOSS=2
 MAXAUG=1
 LAMBDA_SUPCON=1.0
@@ -71,7 +73,7 @@ srun python train_logos_asl_citizen.py \
     --orig_preproc direct224 --aug_preproc direct224 \
     --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon $LAMBDA_SUPCON \
     --max_augs_per_item $MAXAUG \
-    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD --grad_checkpointing \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum 1 --lr $LR \
     --workers 16 \
     --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \

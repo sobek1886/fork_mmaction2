@@ -1,18 +1,19 @@
 #!/bin/bash
 # REAL-BATCH smoke for the glosscon run: same recipe and batch you'll actually train with
-# (full unfreeze + paired + gloss-balanced SupCon + aug-cap + checkpointing, BATCH=16 on H100),
-# but short (--max_steps, --max_videos) so it's cheap. NOT --smoke (that would force batch=2) —
+# (full unfreeze + paired + gloss-balanced SupCon + aug-cap + checkpointing, BATCH=24 on H100),
+# but short (2 epochs on a small subset) so it's cheap. NOT --smoke (that would force batch=2) —
 # the whole point is to exercise the real memory footprint at the real batch size. This is
-# effectively a single-point batch-size probe for BATCH=16+checkpointing.
+# effectively a single-point batch-size probe for BATCH=24+checkpointing.
 #
 # Verifies before committing to the full run:
-#   1) [grad_checkpointing] wraps 16 blocks and a full-unfreeze fwd+bwd+step runs at BATCH=16.
-#   2) It FITS: watch peakGB per step; worst case here is N=2*BATCH=32 (~? GB). The PROBE_RESULT
-#      line reports max_fwd_N actually seen + peak_GPU_GB. If max_fwd_N reaches ~32 and it didn't
-#      OOM, the real run is safe; if max_fwd_N stayed < 32, the worst case wasn't hit (run more
-#      steps or treat peak as a lower bound).
-#   3) Validation runs (checkpointing auto-disables under no_grad) and checkpoint_best/last save.
-#   4) Checkpointed weights re-extract cleanly.
+#   1) [grad_checkpointing] wraps 16 blocks and a full-unfreeze fwd+bwd+step runs at BATCH=24.
+#   2) It FITS: watch peakGB per step; worst case here is N=2*BATCH=48 (predicted ~72 GB). The
+#      PROBE_RESULT line reports max_fwd_N actually seen + peak_GPU_GB. If max_fwd_N reaches ~48 and
+#      it didn't OOM, the real run is safe; if max_fwd_N stayed < 48, the worst case wasn't hit
+#      (treat peak as a lower bound; extrapolate at ~1.4 GB/clip).
+#   3) persistent_workers: epoch 1 starts without the cold worker-respawn stall.
+#   4) Validation runs (checkpointing auto-disables under no_grad) and checkpoint_best/last save.
+#   5) Checkpointed weights re-extract cleanly.
 
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
@@ -30,15 +31,18 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # --- mirror ft_asl_citizen_run_full_glosscon.job ---
-BATCH=16
+BATCH=24
 PER_GLOSS=2
 MAXAUG=1
 UNFREEZE=16
 LLRD=0.9
 LR=2e-4
 # --- smoke knobs (short, but real batch) ---
-STEPS=25            # enough draws to likely hit a near-worst-case (N up to 2*BATCH) batch
-TRAIN_VIDEOS=1500   # subset for variety in the gloss-balanced sampler
+# Run a FULL 2 epochs on a small subset (~25 steps/epoch at BATCH=16) instead of --max_steps, so we
+# cross an epoch boundary — that's the only way to verify persistent_workers (no respawn stall at
+# the start of epoch 1) and that the gloss sampler still reshuffles across epochs.
+EPOCHS=2
+TRAIN_VIDEOS=600    # 600 // 24 = 25 steps/epoch; small enough to be cheap, enough for variety
 
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
@@ -58,8 +62,8 @@ srun python train_logos_asl_citizen.py --paired \
     --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon 1.0 \
     --max_augs_per_item $MAXAUG \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD --grad_checkpointing \
-    --epochs 1 --batch_size $BATCH --grad_accum 1 --lr $LR \
-    --max_steps $STEPS --max_videos $TRAIN_VIDEOS --workers 16 --log_interval 1 \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum 1 --lr $LR \
+    --max_videos $TRAIN_VIDEOS --workers 16 --log_interval 1 \
     --val_csv $SPLITS/val.csv --val_max_videos 40
 
 echo ""
@@ -83,6 +87,9 @@ echo ""
 echo "PASS if ALL of:"
 echo "  - log shows '[grad_checkpointing] wrapped 16 MViT blocks ...'"
 echo "  - NO CUDA OOM; per-step 'peakGB=' stabilises below ~90 GB"
-echo "  - 'PROBE_RESULT ... max_fwd_N=.. peak_GPU_GB=..' printed (note whether max_fwd_N reached ~32)"
-echo "  - '[val] epoch 0: ce=.. top1=.. top5=..' line (validation ran under checkpointing-off)"
+echo "  - PERSISTENT WORKERS: epoch 1's first steps do NOT show the big clip/s drop that epoch 0"
+echo "    started with (workers persisted; warm-up paid once, not per epoch)"
+echo "  - '[val] epoch 0' AND '[val] epoch 1' lines (val loader works across both epochs; sampler"
+echo "    reshuffles — different ce is fine)"
+echo "  - 'PROBE_RESULT ... max_fwd_N=.. peak_GPU_GB=..' printed"
 echo "  - checkpoint_best.pt + checkpoint_last.pt in run/, and .npy files in tiny_feats/"
