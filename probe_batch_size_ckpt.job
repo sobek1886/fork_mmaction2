@@ -1,0 +1,81 @@
+#!/bin/bash
+# Same probe as probe_batch_size_capped.job, but with MViT ACTIVATION CHECKPOINTING on
+# (--grad_checkpointing). The capped probe showed full unfreeze costs ~3.42 GB of activations per
+# 32-frame clip, and that peak is ~100% activations — so checkpointing (recompute in backward
+# instead of store) is the right lever. Goal: find how much bigger the batch (= more SupCon
+# negatives) gets, and whether the run now fits the cheaper 40 GB A100 queue at all.
+#
+# PREREQ: confirm the installed MViT accepts with_cp before trusting an OOM here, e.g.
+#   grep -n "with_cp" $HOME/mmaction2/mmaction/models/backbones/mvit.py
+# If with_cp is NOT a constructor arg, MODELS.build will raise at startup (not OOM) — tell me and
+# we'll wrap the blocks with torch.utils.checkpoint manually instead.
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=probe_batch_ckpt
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=02:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+SPLITS=$HOME/ASL_Citizen/splits
+
+MAXAUG=1
+PER_GLOSS=2
+PROBE_STEPS=30
+
+# Checkpointing should cut per-clip activation cost several-fold, so probe well past the
+# no-checkpoint ceiling (which was batch 16 / N=26 on H100). To test the A100 instead, change the
+# partition above to gpu_a100 and sweep e.g. "8 12 16 24".
+SUMMARY=""
+for B in 16 24 32 48 64; do
+  echo ""
+  echo "==================================================================="
+  echo "  PROBE batch=$B  (full unfreeze + CHECKPOINTING + cap=$MAXAUG, $PROBE_STEPS steps)"
+  echo "==================================================================="
+  OUT=/tmp/probe_ckpt_b${B}.log
+  srun python train_logos_asl_citizen.py \
+      --train_csv      $SPLITS/train.csv \
+      --video_dir      $VIDEO_DIR \
+      --aug_frames_dir $AUG_FRAMES \
+      --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
+      --checkpoint     $CKPT \
+      --save_dir       /tmp/probe_ckpt_b${B} \
+      --orig_preproc direct224 --aug_preproc direct224 \
+      --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon 1.0 \
+      --max_augs_per_item $MAXAUG \
+      --unfreeze_blocks 16 --llrd 0.9 --grad_checkpointing \
+      --batch_size $B --grad_accum 1 --lr 2e-4 \
+      --max_steps $PROBE_STEPS --max_videos 2000 --workers 16 --log_interval 1 \
+      2>&1 | tee "$OUT" | tail -8
+  rc=${PIPESTATUS[0]}
+  res=$(grep -m1 PROBE_RESULT "$OUT" | sed 's/PROBE_RESULT //')
+  if [ "$rc" -eq 0 ]; then
+    echo ">>> batch $B : FIT   ($res)"
+    SUMMARY="${SUMMARY}  batch ${B}: FIT   ${res}
+"
+  else
+    echo ">>> batch $B : OOM/FAIL (exit $rc)"
+    SUMMARY="${SUMMARY}  batch ${B}: OOM/FAIL
+"
+  fi
+  rm -rf /tmp/probe_ckpt_b${B} "$OUT"
+done
+
+echo ""
+echo "==================================================================="
+echo "SUMMARY (size on WORST-CASE N=2*B; checkpointing trades ~20-30% speed for memory):"
+echo "$SUMMARY"
+echo "Pick the largest FIT whose peak_GPU_GB at N=2*B leaves headroom, set BATCH there, and add"
+echo "--grad_checkpointing to ft_asl_citizen_run_full_glosscon.job (it's already wired)."
+echo "==================================================================="

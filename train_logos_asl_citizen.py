@@ -397,15 +397,22 @@ class GlossBalancedBatchSampler(Sampler):
 # Model
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_backbone_trainable(checkpoint_path, device):
+def load_backbone_trainable(checkpoint_path, device, with_cp=False):
     """Build MViTv2-S and load Logos weights (replicates extract_logos_features.py),
-    but kept TRAINABLE (no global no_grad / requires_grad freeze here)."""
+    but kept TRAINABLE (no global no_grad / requires_grad freeze here).
+
+    with_cp=True turns on MViT activation checkpointing: each block recomputes its
+    activations during backward instead of storing them, trading ~20-30% compute for a
+    large activation-memory cut (the dominant cost under full unfreeze). Inference/feature
+    extraction is unaffected — the saved weights are identical.
+    """
     from mmaction.registry import MODELS
     import mmaction.models  # noqa: F401 — registers MViT
 
-    backbone = MODELS.build(dict(
-        type="MViT", arch="small", drop_path_rate=0.1, dim_mul_in_attention=False,
-    ))
+    cfg = dict(type="MViT", arch="small", drop_path_rate=0.1, dim_mul_in_attention=False)
+    if with_cp:
+        cfg["with_cp"] = True
+    backbone = MODELS.build(cfg)
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     state = ckpt.get("state_dict", ckpt)
     backbone_state = {k[len("backbone."):]: v for k, v in state.items()
@@ -423,9 +430,9 @@ def load_backbone_trainable(checkpoint_path, device):
 class LogosClassifier(nn.Module):
     """MViTv2-S backbone + new linear classification head. forward → (feat_768, logits)."""
 
-    def __init__(self, checkpoint, num_classes, device, disc_hidden=256):
+    def __init__(self, checkpoint, num_classes, device, disc_hidden=256, with_cp=False):
         super().__init__()
-        self.backbone = load_backbone_trainable(checkpoint, device)
+        self.backbone = load_backbone_trainable(checkpoint, device, with_cp=with_cp)
         self.head = nn.Linear(768, num_classes)
         nn.init.trunc_normal_(self.head.weight, std=0.02)
         nn.init.zeros_(self.head.bias)
@@ -746,6 +753,11 @@ def main():
     ap.add_argument("--unfreeze_blocks", type=int, default=2,
                     help=f"top N of {NUM_BLOCKS} MViT blocks to unfreeze; >={NUM_BLOCKS} = full FT")
     ap.add_argument("--llrd", type=float, default=1.0, help="layer-wise LR decay (full FT)")
+    ap.add_argument("--grad_checkpointing", action="store_true",
+                    help="enable MViT activation checkpointing (with_cp): recompute block "
+                         "activations in backward instead of storing them. ~20-30% slower, but "
+                         "cuts the dominant (activation) memory cost of full unfreeze → much larger "
+                         "batch. Output weights unchanged, so re-extraction is unaffected.")
     # optim
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--batch_size", type=int, default=16)
@@ -856,7 +868,8 @@ def main():
                                     num_workers=args.workers, pin_memory=True)
 
     # model
-    model = LogosClassifier(args.checkpoint, args.num_classes, device, disc_hidden=args.disc_hidden)
+    model = LogosClassifier(args.checkpoint, args.num_classes, device,
+                            disc_hidden=args.disc_hidden, with_cp=args.grad_checkpointing)
     if args.load_head:   # two-stage: resume the head too (not just the backbone)
         _ck = torch.load(args.checkpoint, map_location="cpu")
         _st = _ck.get("state_dict", _ck)

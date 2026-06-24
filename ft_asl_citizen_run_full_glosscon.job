@@ -17,7 +17,9 @@
 # limit on this experiment. Raise BATCH if memory allows (more negatives = stronger contrastive);
 # if OOM, lower it. Preprocessing: direct224. CE is kept alongside SupCon for head/discriminability.
 
-#SBATCH --partition=gpu_a100
+# NOTE: must be gpu_h100 (94 GB). Full unfreeze costs ~3.4 GB of activations PER 32-frame clip;
+# the 40 GB A100 can't even fit batch 8 (needs ~48 GB). See probe_batch_size_capped.job.
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --job-name=ft_asl_run_full_glosscon
 #SBATCH --ntasks=1
@@ -40,9 +42,12 @@ LR=2e-4
 LLRD=0.9
 # Forward size is now bounded: B originals + at most B*MAXAUG augs. With MAXAUG=1 the augs are
 # mostly redundant same-gloss positives, so capping them frees memory for MORE distinct glosses
-# (= more SupCon negatives, the scarce resource). Set BATCH from probe_batch_size_capped.job
-# (largest FIT one notch down, leaving headroom on peak_GPU_GB).
-BATCH=6
+# (= more SupCon negatives, the scarce resource).
+# Sizing (from probe_batch_size_capped.job on H100, ~3.42 GB/clip): peak must hold the WORST case
+# N = 2*B (every original drawing its aug), not the probe's observed max. 2*B=24 → ~83 GB (fits
+# 94 GB with headroom); 2*B=28 → ~96 GB (OOM). So BATCH=12 is the ceiling. (The probe's "FIT" at
+# 16 was luck — it never drew a full-aug batch in 30 steps; a 10-epoch run would, and OOM.)
+BATCH=12
 PER_GLOSS=2
 MAXAUG=1
 LAMBDA_SUPCON=1.0
