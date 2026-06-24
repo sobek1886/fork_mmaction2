@@ -397,22 +397,42 @@ class GlossBalancedBatchSampler(Sampler):
 # Model
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _enable_block_checkpointing(backbone):
+    """Wrap each MViT transformer block's forward in torch.utils.checkpoint, so its activations
+    are recomputed during backward instead of stored — the big lever on full-unfreeze memory
+    (~3.4 GB/clip, ~100% activations). This mmaction MViT has no `with_cp` constructor arg, so we
+    patch the blocks directly. Signature-agnostic: MViT blocks take/return (x, thw), and the
+    wrapper just forwards whatever args the block receives. Only active when grad is enabled, so
+    inference / validation / feature re-extraction pay nothing and produce identical outputs.
+    """
+    import torch.utils.checkpoint as cp
+    n = 0
+    for blk in backbone.blocks:
+        orig = blk.forward
+        def wrapped(*args, _orig=orig, **kwargs):   # _orig default-arg pins per-block binding
+            if torch.is_grad_enabled():
+                # use_reentrant=False handles the non-tensor `thw` args/outputs and preserves RNG
+                # (so stochastic-depth masks match between forward and recompute).
+                return cp.checkpoint(_orig, *args, use_reentrant=False, **kwargs)
+            return _orig(*args, **kwargs)
+        blk.forward = wrapped
+        n += 1
+    print(f"[grad_checkpointing] wrapped {n} MViT blocks with activation checkpointing")
+
+
 def load_backbone_trainable(checkpoint_path, device, with_cp=False):
     """Build MViTv2-S and load Logos weights (replicates extract_logos_features.py),
     but kept TRAINABLE (no global no_grad / requires_grad freeze here).
 
-    with_cp=True turns on MViT activation checkpointing: each block recomputes its
-    activations during backward instead of storing them, trading ~20-30% compute for a
-    large activation-memory cut (the dominant cost under full unfreeze). Inference/feature
-    extraction is unaffected — the saved weights are identical.
+    with_cp=True enables activation checkpointing on the MViT blocks (see
+    _enable_block_checkpointing): ~20-30% slower, but a large activation-memory cut.
     """
     from mmaction.registry import MODELS
     import mmaction.models  # noqa: F401 — registers MViT
 
-    cfg = dict(type="MViT", arch="small", drop_path_rate=0.1, dim_mul_in_attention=False)
-    if with_cp:
-        cfg["with_cp"] = True
-    backbone = MODELS.build(cfg)
+    backbone = MODELS.build(dict(
+        type="MViT", arch="small", drop_path_rate=0.1, dim_mul_in_attention=False,
+    ))
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     state = ckpt.get("state_dict", ckpt)
     backbone_state = {k[len("backbone."):]: v for k, v in state.items()
@@ -424,6 +444,8 @@ def load_backbone_trainable(checkpoint_path, device, with_cp=False):
               f"e.g. {non_head_missing[:3]}")
     if unexpected:
         print(f"[load_backbone] {len(unexpected)} unexpected keys ignored")
+    if with_cp:
+        _enable_block_checkpointing(backbone)
     return backbone.to(device)
 
 

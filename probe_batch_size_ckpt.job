@@ -5,10 +5,10 @@
 # instead of store) is the right lever. Goal: find how much bigger the batch (= more SupCon
 # negatives) gets, and whether the run now fits the cheaper 40 GB A100 queue at all.
 #
-# PREREQ: confirm the installed MViT accepts with_cp before trusting an OOM here, e.g.
-#   grep -n "with_cp" $HOME/mmaction2/mmaction/models/backbones/mvit.py
-# If with_cp is NOT a constructor arg, MODELS.build will raise at startup (not OOM) — tell me and
-# we'll wrap the blocks with torch.utils.checkpoint manually instead.
+# This mmaction MViT has no `with_cp` arg, so --grad_checkpointing wraps each block's forward with
+# torch.utils.checkpoint directly (see _enable_block_checkpointing). On startup you should see
+# "[grad_checkpointing] wrapped 16 MViT blocks ..." — if that line is missing, checkpointing is
+# NOT active and the numbers below are meaningless.
 
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
