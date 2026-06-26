@@ -40,42 +40,35 @@ def _detect_crop(frames, threshold: int = 15):
 
 
 def _process_one(args):
-    in_path, out_path, overwrite = args
+    in_path, out_path, overwrite, x_offset = args
     if not overwrite and os.path.exists(out_path):
         return out_path, 'skip'
     try:
         import cv2
+        # Known crop: content is (0, 0, 1280, 720), sq=720
+        sq, y_sq = 720, 0
+
         cap = cv2.VideoCapture(in_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frames = []
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            frames.append(frame)
-        cap.release()
-        if not frames:
-            return out_path, 'error: no frames'
 
-        x, y, w, h = _detect_crop(frames)
-        sq = min(w, h)
-
-        # RIGHT camera: landscape content, signer is right-of-centre.
-        # Right-align the square crop to keep hands in frame.
-        x_sq = x + (w - sq)
-        y_sq = y
-
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
         writer = cv2.VideoWriter(
             out_path,
             cv2.VideoWriter_fourcc(*'mp4v'),
             fps,
             (sq, sq),
         )
-        for frame in frames:
-            writer.write(frame[y_sq:y_sq + sq, x_sq:x_sq + sq])
+        n = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            writer.write(frame[y_sq:y_sq + sq, x_offset:x_offset + sq])
+            n += 1
+        cap.release()
         writer.release()
-        return out_path, f'ok content=({x},{y},{w},{h}) sq={sq}x{sq} x_sq={x_sq}'
+        if n == 0:
+            return out_path, 'error: no frames'
+        return out_path, f'ok frames={n} x_offset={x_offset}'
     except Exception as e:
         return out_path, f'error: {e}'
 
@@ -85,20 +78,22 @@ def main():
     ap.add_argument('--input_dir',  required=True)
     ap.add_argument('--output_dir', required=True)
     ap.add_argument('--workers',    type=int, default=4)
+    ap.add_argument('--x_offset',   type=int, required=True,
+                    help='Horizontal start of 720x720 crop within the 1280x720 content area')
     ap.add_argument('--overwrite',  action='store_true')
     args = ap.parse_args()
 
     input_root  = Path(args.input_dir)
     output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
 
-    mkv_files = sorted(input_root.rglob('*_RIGHT_*.mkv'))
-    print(f'Found {len(mkv_files)} RIGHT MKV files')
+    mkv_files = sorted(input_root.glob('*_RIGHT_*.mkv'))
+    print(f'Found {len(mkv_files)} RIGHT MKV files in {input_root.name}')
 
     work = []
     for f in mkv_files:
-        rel = f.relative_to(input_root)
-        out_path = output_root / rel.parent / (f.stem + '.mp4')
-        work.append((str(f), str(out_path), args.overwrite))
+        out_path = output_root / (f.stem + '.mp4')
+        work.append((str(f), str(out_path), args.overwrite, args.x_offset))
 
     done = skipped = errors = 0
     with ProcessPoolExecutor(max_workers=args.workers) as ex:

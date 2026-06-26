@@ -1,0 +1,70 @@
+#!/bin/bash
+# Diagnostic for the data-loading bottleneck (the SDDA run was ~1 clip/s, fully data-bound).
+# Gathers what we need to decide the fix: node-local scratch capacity, dataset sizes, source
+# video resolution, and a TIMED cold decode of a handful of videos straight from scratch-shared
+# (this is the number that decides staging-alone vs staging + 224 pre-resize). No real GPU work,
+# but runs on gpu_h100 so $TMPDIR reflects the nodes the real run will use.
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=probe_data
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=00:20:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+
+echo "===== node-local scratch (\$TMPDIR) ====="
+echo "TMPDIR=$TMPDIR"
+df -h "$TMPDIR"
+
+echo ""
+echo "===== dataset sizes on scratch-shared (du can be slow on augmented_frames) ====="
+du -sh "$VIDEO_DIR"
+du -sh "$AUG_FRAMES"
+echo "video count: $(find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | wc -l)"
+
+echo ""
+echo "===== sample video resolution + frame count ====="
+SAMPLE=$(find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | head -1)
+echo "sample: $SAMPLE"
+python - "$SAMPLE" <<'PY'
+import sys, cv2
+cap = cv2.VideoCapture(sys.argv[1])
+w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)); fps = cap.get(cv2.CAP_PROP_FPS) or 0
+print(f"resolution={w}x{h}  frames={n}  fps={fps:.1f}")
+cap.release()
+PY
+
+echo ""
+echo "===== timed COLD decode of 30 videos from scratch-shared (mirrors training's decode-all) ====="
+python - "$VIDEO_DIR" <<'PY'
+import sys, os, time, glob, random, cv2
+vids = sorted(glob.glob(os.path.join(sys.argv[1], "*.mp4")))
+random.Random(0).shuffle(vids)          # random files -> avoid any directory-locality cache help
+vids = vids[:30]
+t0 = time.time(); total = 0
+for v in vids:
+    cap = cv2.VideoCapture(v); c = 0
+    while True:
+        ok, _ = cap.read()
+        if not ok: break
+        c += 1
+    cap.release(); total += c
+dt = time.time() - t0
+print(f"decoded {len(vids)} videos, {total} frames in {dt:.1f}s "
+      f"= {len(vids)/dt:.2f} vid/s, {total/dt:.0f} frame/s")
+print("NB: 1 'video' == 1 training clip (origs). Compare vid/s to the ~1.1 clip/s SDDA saw,")
+print("and to the warm ~12 clip/s the cached 600-video smoke saw.")
+PY
+
+echo ""
+echo "Done. Report back: TMPDIR df, the two du sizes, sample resolution, and the vid/s line."
