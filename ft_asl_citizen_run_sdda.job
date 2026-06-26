@@ -10,7 +10,7 @@
 #SBATCH --job-name=ft_asl_run_sdda
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=14:00:00
+#SBATCH --time=40:00:00
 #SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
 
 module purge
