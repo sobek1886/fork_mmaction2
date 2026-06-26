@@ -1,16 +1,22 @@
 #!/bin/bash
-# MATCHED CE control for ft_asl_citizen_run_full_glosscon.job. IDENTICAL recipe — full unfreeze,
-# same H100 + grad checkpointing, same BATCH=24, same gloss-balanced paired data path with the
-# aug cap — EXCEPT --lambda_supcon 0 (no contrastive term). So:
-#     run_full_glosscon  −  run_full_ce  =  the gloss-contrastive loss's contribution, isolated.
-# It also answers "does full unfreeze beat the top-6 CE run (run2_mid)?". Keep BATCH / EPOCHS /
-# grad_checkpointing IN SYNC with run_full_glosscon, or the comparison is confounded.
-# (The trainer will print a benign "[WARN] --gloss_balanced set but --lambda_supcon=0" — that is
-# intended here: we want CE on the same class-balanced+aug batches, just without SupCon.)
+# FULL-UNFREEZE SDDA: the third member of the full-unfreeze family, alongside
+#   run_full_ce       (CE only)                         — the control
+#   run_full_glosscon (CE + gloss-level SupCon)         — gloss-contrastive
+#   run_full_sdda     (CE + KL-consistency + GRL disc)  — THIS run (SDDA, Fu et al. 2024)
+# IDENTICAL recipe to run_full_ce (full unfreeze, H100 + grad checkpointing, BATCH=24, same
+# gloss-balanced paired data path with the aug cap) — the ONLY difference is the auxiliary loss:
+# --lambda_kl 1.0 + --lambda_disc 1e-4 instead of SupCon. So the full-unfreeze three-way isolates
+# "which auxiliary objective helps at equal depth/capacity".
+#
+# NOTE: this is the full-unfreeze FAMILY member, matched to run_full_ce/glosscon (batch 24, LR 2e-4,
+# gloss-balanced, aug cap). It is NOT a like-for-like depth ablation of the top-2 ft_asl_citizen_-
+# run_sdda.job (which uses batch 8, LR 1e-4, regular batching, all augs) — those differ in more
+# than depth. The KL/disc losses are per orig-aug pair and indifferent to gloss-balanced batching,
+# and with --max_augs_per_item 1 each original still contributes one aug, so both losses fire.
 
 #SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
-#SBATCH --job-name=ft_asl_run_full_ce
+#SBATCH --job-name=ft_asl_run_full_sdda
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --time=40:00:00
@@ -23,15 +29,16 @@ source .venv/bin/activate
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-TAG=run_full_ce
+TAG=run_full_sdda
 UNFREEZE=16
 LR=2e-4
 LLRD=0.9
-BATCH=24            # MUST match run_full_glosscon
+BATCH=24            # MUST match run_full_ce / run_full_glosscon
 PER_GLOSS=2
 MAXAUG=1
 EPOCHS=10
-LAMBDA_SUPCON=0     # the ONLY difference from run_full_glosscon
+LAMBDA_KL=1.0       # alpha (SDDA Eq. 6)
+LAMBDA_DISC=1e-4    # beta  (SDDA Eq. 7)
 
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
@@ -49,7 +56,8 @@ srun python train_logos_asl_citizen.py \
     --checkpoint     $CKPT \
     --save_dir       $SAVE_DIR \
     --orig_preproc direct224 --aug_preproc direct224 \
-    --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon $LAMBDA_SUPCON \
+    --paired --gloss_balanced --per_gloss $PER_GLOSS \
+    --lambda_supcon 0 --lambda_consist 0 --lambda_kl $LAMBDA_KL --lambda_disc $LAMBDA_DISC \
     --max_augs_per_item $MAXAUG \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD --grad_checkpointing \
     --epochs $EPOCHS --batch_size $BATCH --grad_accum 1 --lr $LR \
@@ -65,6 +73,6 @@ srun python extract_logos_features.py \
     --preproc direct224 --overwrite \
     --workers 16 --batch_size 8
 
-echo "Done. Features in $FEAT_DIR — 'run_full_ce' is registered in eval_asl_citizen_features.job."
+echo "Done. Features in $FEAT_DIR — add 'run_full_sdda' to the eval FEATS map."
 RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
 [ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true
