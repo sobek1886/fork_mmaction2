@@ -1,0 +1,102 @@
+#!/bin/bash
+# Ensure every Logos backbone run has a COMPLETE feature dir, extracting ONLY what's missing.
+# Companion to MMPT jobs/eval_asl_citizen_features.job: submit this first, then the eval with
+#   --dependency=afterok:<this job id>  (see the chained submit at the bottom of this file).
+#
+# Per run: count existing .npy; if the dir is already complete (>= 99% of the video count) it is
+# LEFT UNTOUCHED. Otherwise, if a checkpoint exists, run extract_logos_features.py WITHOUT
+# --overwrite — it skips files that already exist (extract_logos_features.py:92) and writes only
+# the missing ones. Runs with no checkpoint (legacy baselines / i3d) are skipped here; they're
+# evaluated only if their features already happen to be complete.
+#
+# Per-run extraction failures are non-fatal (logged), so the job still exits 0 and the dependent
+# eval runs; anything still short is caught by the eval's --min_coverage guard.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=extract_missing
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=24:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+LOGOS_INIT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
+RUNS=/scratch-shared/psobecki/runs               # SAVE_DIRs: $RUNS/asl_ft_<name>/checkpoint_best.pt
+FEATROOT=/scratch-shared/psobecki/ASL_Citizen
+
+# name → feature dir (must match MMPT jobs/eval_asl_citizen_features.job)
+declare -A FEATS=(
+  [baseline_native]=$FEATROOT/logos_features_native
+  [run2]=$FEATROOT/logos_features_run2
+  [run3]=$FEATROOT/logos_features_run3
+  [run1]=$FEATROOT/logos_features_run1
+  [twostage]=$FEATROOT/logos_features_twostage
+  [run2_mid]=$FEATROOT/logos_features_run2_mid
+  [run1_mid]=$FEATROOT/logos_features_run1_mid
+  [run1_clscontrast]=$FEATROOT/logos_features_run1_clscontrast
+  [run_full_ce]=$FEATROOT/logos_features_run_full_ce
+  [run_full_glosscon]=$FEATROOT/logos_features_run_full_glosscon
+  [run_sdda]=$FEATROOT/logos_features_run_sdda
+  [run_full_sdda]=$FEATROOT/logos_features_run_full_sdda
+)
+# name → checkpoint to extract from (baseline_native = the no-FT Logos init)
+declare -A CKPT=(
+  [baseline_native]=$LOGOS_INIT
+  [run2]=$RUNS/asl_ft_run2/checkpoint_best.pt
+  [run3]=$RUNS/asl_ft_run3/checkpoint_best.pt
+  [run1]=$RUNS/asl_ft_run1/checkpoint_best.pt
+  [twostage]=$RUNS/asl_ft_twostage/checkpoint_best.pt
+  [run2_mid]=$RUNS/asl_ft_run2_mid/checkpoint_best.pt
+  [run1_mid]=$RUNS/asl_ft_run1_mid/checkpoint_best.pt
+  [run1_clscontrast]=$RUNS/asl_ft_run1_clscontrast/checkpoint_best.pt
+  [run_full_ce]=$RUNS/asl_ft_run_full_ce/checkpoint_best.pt
+  [run_full_glosscon]=$RUNS/asl_ft_run_full_glosscon/checkpoint_best.pt
+  [run_sdda]=$RUNS/asl_ft_run_sdda/checkpoint_best.pt
+  [run_full_sdda]=$RUNS/asl_ft_run_full_sdda/checkpoint_best.pt
+)
+# name → preprocessing the run was TRAINED with (MUST match, or re-extracted features are invalid)
+declare -A PREPROC=(
+  [baseline_native]=logos_native
+  [run2]=logos_native [run3]=logos_native [run1]=logos_native
+  [twostage]=direct224 [run2_mid]=direct224 [run1_mid]=direct224 [run1_clscontrast]=direct224
+  [run_full_ce]=direct224 [run_full_glosscon]=direct224 [run_sdda]=direct224 [run_full_sdda]=direct224
+)
+
+ALL="baseline_native run2 run3 run1 twostage run2_mid run1_mid run1_clscontrast \
+     run_full_ce run_full_glosscon run_sdda run_full_sdda"
+
+EXPECTED=$(find "$VIDEO_DIR" -maxdepth 1 -name '*.mp4' | wc -l)
+THRESH=$(( EXPECTED * 99 / 100 ))
+echo "Expected ~$EXPECTED feature files per complete run (extract if < $THRESH)."
+
+for name in $ALL; do
+  dir=${FEATS[$name]}; ckpt=${CKPT[$name]}; pp=${PREPROC[$name]}
+  got=$(find "$dir" -maxdepth 1 -name '*.npy' 2>/dev/null | wc -l)
+  if [ "$got" -ge "$THRESH" ]; then
+    echo "[have]    $name: $got/$EXPECTED — complete, NOT re-extracting"
+    continue
+  fi
+  if [ ! -f "$ckpt" ]; then
+    echo "[no-ckpt] $name: $got/$EXPECTED and no checkpoint at $ckpt — skipping (train it first)"
+    continue
+  fi
+  echo ""
+  echo "[extract] $name: $got/$EXPECTED present → filling missing (preproc=$pp)"
+  mkdir -p "$dir"
+  srun python extract_logos_features.py \
+      --video_dir "$VIDEO_DIR" --output_dir "$dir" \
+      --checkpoint "$ckpt" --dataset_name asl_citizen \
+      --preproc "$pp" --workers 16 --batch_size 8 \
+      || echo "== WARN extraction failed for $name (eval's coverage guard will catch it) =="
+done
+
+echo ""
+echo "Extraction pass done. Now submit the eval (it will verify full coverage):"
+echo "  cd \$HOME/Fork_SignCLIP/examples/MMPT && sbatch jobs/eval_asl_citizen_features.job"
