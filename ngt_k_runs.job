@@ -11,6 +11,18 @@
 #   sbatch --job-name=ngt_baseline --export=EXPERIMENT=ngt_baseline                     ngt_k_runs.job
 #   sbatch --job-name=ngt_app_inv  --export=EXPERIMENT=ngt_appearance_invariant          ngt_k_runs.job
 #   sbatch --job-name=ngt_unreal   --export=EXPERIMENT=ngt_unreal_baseline,USE_UNREAL=1  ngt_k_runs.job
+#
+# Synthetic-signer-count ablation arms (story point 14; dose-response over
+# 0/1/2 synthetic avatars = ngt_baseline / ngt_k6_* / ngt_appearance_invariant;
+# 3+ avatars require new Unreal renders + manifest rebuild first):
+#   sbatch --job-name=ngt_k6_palmer --export=EXPERIMENT=ngt_k6_palmer  ngt_k_runs.job
+#   sbatch --job-name=ngt_k6_digits --export=EXPERIMENT=ngt_k6_digits  ngt_k_runs.job
+#
+# Single-view Flux-vs-Unreal arms (story point 12; prereqs:
+# extract_logos_features_ngt_flux.job then make_ngt_singleview_manifest.py):
+#   sbatch --job-name=ngt_sv_real   --export=EXPERIMENT=ngt_sv_real    ngt_k_runs.job
+#   sbatch --job-name=ngt_sv_unreal --export=EXPERIMENT=ngt_sv_unreal  ngt_k_runs.job
+#   sbatch --job-name=ngt_sv_flux   --export=EXPERIMENT=ngt_sv_flux    ngt_k_runs.job
 
 module purge
 module load 2025
