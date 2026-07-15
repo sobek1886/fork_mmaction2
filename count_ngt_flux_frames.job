@@ -1,0 +1,55 @@
+#!/bin/bash
+
+#SBATCH --partition=genoa
+#SBATCH --job-name=count_ngt_flux
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:30:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_count_ngt_flux_%A.txt
+
+# Count the Flux-augmented NGT frames transferred to Snellius scratch, so the
+# totals can be compared against the local counts under
+# nano_banana/output/flux-aug/ngt/ (pushed by rsync_ngt_to_snellius.sh).
+#
+# On Snellius the tree mirrors local:
+#   $ROOT/<date>/augmented_frames/<video_id>/<aug>/NNNN.jpg
+#
+# Local reference (2026-07-15):
+#   2025-11-26 : 158840 frames  (316 video dirs)
+#   2025-12-17 : 166308 frames  (245 video dirs)
+#   2026-01-29 : 179508 frames  (313 video dirs)
+#   2026-03-16 : 354740 frames  (521 video dirs)
+#   TOTAL      : 859396 frames
+
+ROOT=/scratch-shared/psobecki/NGT_flux
+DATES=(2025-11-26 2025-12-17 2026-01-29 2026-03-16)
+
+echo "Counting .jpg frames under $ROOT"
+echo "==================================================================="
+
+grand_total=0
+for d in "${DATES[@]}"; do
+    dir="$ROOT/$d"
+    if [ ! -d "$dir" ]; then
+        echo "$d : MISSING ($dir not found)"
+        continue
+    fi
+
+    n=$(find "$dir" -type f -name '*.jpg' | wc -l)
+    vids=$(find "$dir/augmented_frames" -mindepth 1 -maxdepth 1 -type d | wc -l)
+    grand_total=$((grand_total + n))
+
+    printf '%s : %8d frames  (%d video dirs)\n' "$d" "$n" "$vids"
+
+    # Per-augmentation breakdown within this date.
+    for aug in glasses shirt_1 signer_swap skin_mst_diffusion; do
+        an=$(find "$dir/augmented_frames" -type d -name "$aug" -exec sh -c \
+             'find "$1" -type f -name "*.jpg" | wc -l' _ {} \; \
+             | awk '{s+=$1} END{print s+0}')
+        printf '           %-20s %8d\n' "$aug" "$an"
+    done
+done
+
+echo "==================================================================="
+printf 'TOTAL : %d frames\n' "$grand_total"
+echo "Local total for comparison: 859396 frames"
