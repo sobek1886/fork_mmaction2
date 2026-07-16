@@ -21,10 +21,14 @@ module load 2025
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
+# Shared A100 slice (~40 GB); CLIP_LEN=32 @ 224x224 makes each clip heavy, so
+# keep batch_size modest and let PyTorch grow segments to avoid fragmentation.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 srun python extract_logos_features_ngt_flux.py \
     --flux_root   /scratch-shared/psobecki/NGT_flux \
     --output_dir  /scratch-shared/psobecki/NGT_flux/logos_features \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dates       2025-11-26 2025-12-17 2026-01-29 2026-03-16 \
     --workers 5 \
-    --batch_size 64
+    --batch_size 16

@@ -87,7 +87,7 @@ def _preprocess_worker(args):
         clips_np: (N, 3, CLIP_LEN, 224, 224) float32, or None on skip/error
         status:   'ok' | 'skip' | 'error: <msg>'
     """
-    vpath, out_path, overwrite, preproc = args
+    vpath, out_path, overwrite, preproc, frame_interval = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
