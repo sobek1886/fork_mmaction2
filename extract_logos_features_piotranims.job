@@ -12,6 +12,10 @@
 # the ladder's common effective 15 fps (matching the 15 fps Flux frames at
 # interval 1). Output goes to a NEW _15fps dir so the original 30 fps-effective
 # features (logos_features, used by the old Table-5 runs) stay reproducible.
+# Input: NGT_dataset/train, rsynced from the workstation's Data/ngt_train_set
+# (720x720, already square-cropped — no crop step needed). Videos are searched
+# recursively, so the per-session date subfolders are fine; extra views
+# (LEFT/MIDDLE files) staged into the same tree are picked up automatically.
 
 module purge
 module load 2025
@@ -20,7 +24,7 @@ cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
 srun python extract_logos_features.py \
-    --video_dir   /scratch-shared/psobecki/piotrAnims/mkv_cropped \
+    --video_dir   /scratch-shared/psobecki/NGT_dataset/train \
     --output_dir  /scratch-shared/psobecki/piotrAnims/logos_features_15fps \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dataset_name piotr_anims \
