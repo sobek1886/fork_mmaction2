@@ -18,11 +18,15 @@
 #   sbatch --job-name=ngt_k6_palmer --export=EXPERIMENT=ngt_k6_palmer  ngt_k_runs.job
 #   sbatch --job-name=ngt_k6_digits --export=EXPERIMENT=ngt_k6_digits  ngt_k_runs.job
 #
-# Single-view Flux-vs-Unreal arms (story point 12; prereqs:
-# extract_logos_features_ngt_flux.job then make_ngt_singleview_manifest.py):
-#   sbatch --job-name=ngt_sv_real   --export=EXPERIMENT=ngt_sv_real    ngt_k_runs.job
-#   sbatch --job-name=ngt_sv_unreal --export=EXPERIMENT=ngt_sv_unreal  ngt_k_runs.job
-#   sbatch --job-name=ngt_sv_flux   --export=EXPERIMENT=ngt_sv_flux    ngt_k_runs.job
+# Flux-vs-Unreal ladder E1-E10 + subset tier (prereqs: extraction jobs for all
+# four sessions, then make_ngt_singleview_manifest.py; these arms are
+# auto-evaluated on ngt_sv_eval_manifest.json, FRONT-view primary readout):
+#   for EXP in ngt_sv_real ngt_sv_real_multiview ngt_sv_unreal ngt_sv_flux \
+#              ngt_sv_unreal_full ngt_sv_flux_full ngt_sv_flux_glasses \
+#              ngt_sv_combined ngt_sv_unreal_only ngt_sv_flux_only \
+#              ngt_subset_real ngt_subset_unreal_full ngt_subset_flux_full; do
+#     sbatch --job-name=$EXP --export=EXPERIMENT=$EXP ngt_k_runs.job
+#   done
 
 module purge
 module load 2025
@@ -39,7 +43,15 @@ BASE_DIR="/scratch-shared/psobecki/runs/retri_ngt"
 YAML_ORIG="projects/retri/signclip_ngt/${EXPERIMENT}.yaml"
 USE_UNREAL_FLAG=${USE_UNREAL:+--use_unreal}
 
-echo "Experiment : $EXPERIMENT  K=$K"
+# Flux-vs-Unreal ladder arms are evaluated on the shared take-list eval
+# manifest (FRONT-view primary readout, per-sentence ranks, length baseline);
+# legacy experiments keep the original 3-view pair manifest.
+case "$EXPERIMENT" in
+  ngt_sv_*|ngt_subset_*) EVAL_MANIFEST=/home/psobecki/ngt_sv_eval_manifest.json ;;
+  *)                     EVAL_MANIFEST=/home/psobecki/ngt_pair_manifest.json ;;
+esac
+
+echo "Experiment : $EXPERIMENT  K=$K  eval manifest: $EVAL_MANIFEST"
 
 for i in $(seq 1 $K); do
     SEED=$((40 + i))
@@ -71,7 +83,7 @@ PYEOF
     python eval_ngt_retrieval.py \
         --config      "$YAML_ORIG" \
         --checkpoint  "${RUN_DIR}/checkpoint_last.pt" \
-        --manifest    /home/psobecki/ngt_pair_manifest.json \
+        --manifest    "$EVAL_MANIFEST" \
         --bushuis_dir /scratch-shared/psobecki/Bushuis/logos_features \
         --output_json "${RUN_DIR}/eval_results.json" \
         ${USE_UNREAL_FLAG}

@@ -9,11 +9,19 @@ from pathlib import Path
 import numpy as np
 
 METRICS = ["R@1", "R@5", "R@10", "MRR"]
-DIRECTIONS = {
+# Legacy eval_results.json (make_ngt_pair_manifest.py evals)
+DIRECTIONS_LEGACY = {
     "b2s_avg": "B→S  avg(L+M+R)",
     "b2s_mid": "B→S  mid only ",
     "s2b_avg": "S→B  avg(L+M+R)",
     "s2b_mid": "S→B  mid only ",
+}
+# Take-list eval_results.json ("style": "front"; Flux-vs-Unreal ladder)
+DIRECTIONS_FRONT = {
+    "b2s_front": "B→S  front view",
+    "s2b_front": "S→B  front view",
+    "b2s_avg":   "B→S  avg views ",
+    "s2b_avg":   "S→B  avg views ",
 }
 
 
@@ -46,6 +54,8 @@ def main():
         sys.exit("No results found.")
 
     K = len(results)
+    front_style = results[0].get("style") == "front"
+    DIRECTIONS = DIRECTIONS_FRONT if front_style else DIRECTIONS_LEGACY
     print(f"\nExperiment: {args.experiment}  ({K}/{args.k} runs found)")
     print("=" * 65)
 
@@ -60,6 +70,15 @@ def main():
             summary[dir_key][metric] = {"mean": mean, "std": std, "runs": vals}
             runs_str = "  ".join(f"{v:5.1f}" for v in vals)
             print(f"    {metric:<6}  {mean:5.2f} ± {std:4.2f}   [{runs_str}]")
+
+    if front_style:
+        # Shortcut floor: retrieval by sentence length alone (same every run).
+        lb = results[0].get("length_baseline", {})
+        for key, label in [("len_b2s", "B→S"), ("len_s2b", "S→B")]:
+            if key in lb:
+                summary[key] = lb[key]
+                print(f"\n  Length-only baseline {label}: "
+                      + "  ".join(f"{m}={lb[key][m]:.1f}" for m in METRICS))
 
     out = Path(args.base_dir) / f"{args.experiment}_aggregated.json"
     with open(out, "w") as f:
