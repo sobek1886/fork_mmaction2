@@ -11,8 +11,8 @@
 # Extract Logos features from the Flux-augmented NGT frames (Flux-vs-Unreal
 # comparison, experiment ladder E1-E10 — see make_ngt_singleview_manifest.py).
 # Prereq: rsync nano_banana/output/flux-aug/ngt to
-#   /scratch-shared/psobecki/NGT_Flux/flux-aug/ngt (see nano_banana rsync
-#   scripts). ALL FOUR session batches are needed (the experiment uses the
+#   /scratch-shared/psobecki/NGT_flux/{date}/augmented_frames (see nano_banana
+#   rsync scripts). ALL FOUR session batches are needed (the experiment uses the
 #   full 4-signer train set).
 
 module purge
@@ -22,8 +22,8 @@ cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
 srun python extract_logos_features_ngt_flux.py \
-    --flux_root   /scratch-shared/psobecki/NGT_Flux \
-    --output_dir  /scratch-shared/psobecki/NGT_Flux/logos_features \
+    --flux_root   /scratch-shared/psobecki/NGT_flux \
+    --output_dir  /scratch-shared/psobecki/NGT_flux/logos_features \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dates       2025-11-26 2025-12-17 2026-01-29 2026-03-16 \
     --workers 5 \
