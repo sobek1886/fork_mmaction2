@@ -124,8 +124,10 @@ def _preprocess_worker(args):
         # Now switchable via `preproc` (default 'logos_native', aspect-preserving):
         processed = np.stack([preprocess_frame(frame, preproc) for frame in frames])  # (T,3,H,W)
 
-        # Build clips with FRAME_INTERVAL subsampling
-        effective_span = CLIP_LEN * FRAME_INTERVAL  # 64 frames
+        # Build clips with frame_interval subsampling. Pick the interval so the
+        # EFFECTIVE sampling rate is consistent across data sources:
+        # source_fps / frame_interval = target effective fps (NGT ladder: 15).
+        effective_span = CLIP_LEN * frame_interval
 
         if T < effective_span:
             starts = [0]
@@ -138,7 +140,7 @@ def _preprocess_worker(args):
 
         clips = []
         for start in starts:
-            indices = [min(start + i * FRAME_INTERVAL, T - 1) for i in range(CLIP_LEN)]
+            indices = [min(start + i * frame_interval, T - 1) for i in range(CLIP_LEN)]
             clip = processed[indices]           # (CLIP_LEN, 3, H, W)
             clip = clip.transpose(1, 0, 2, 3)  # (3, CLIP_LEN, H, W)
             clips.append(clip)
@@ -228,6 +230,12 @@ def main():
                              '(aspect-preserving but CLIPS hands at the sides on 4:3 frames).')
     parser.add_argument('--prefetch',     type=int, default=None,
                         help='Videos to prefetch (default: workers * 8)')
+    parser.add_argument('--frame_interval', type=int, default=FRAME_INTERVAL,
+                        help='Sample every Nth frame (default 2). Choose so '
+                             'source_fps / frame_interval matches the target '
+                             'effective fps across all data sources — the NGT '
+                             'Flux-vs-Unreal ladder targets 15 fps effective '
+                             '(60 fps sources -> 4).')
     parser.add_argument('--overwrite',    action='store_true')
     args = parser.parse_args()
 
@@ -236,7 +244,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'CPU workers: {args.workers}  |  GPU batch: {args.batch_size}  |  Prefetch: {prefetch}')
-    print(f'Preprocessing: {args.preproc}')
+    print(f'Preprocessing: {args.preproc}  |  Frame interval: {args.frame_interval}')
 
     print(f'Loading backbone from {args.checkpoint} ...')
     backbone = load_backbone(args.checkpoint, device)
@@ -253,7 +261,8 @@ def main():
     for vpath in video_files:
         vid = Path(vpath).stem
         out_path = os.path.join(args.output_dir, f'{args.dataset_name}_{vid}.npy')
-        work.append((vpath, out_path, args.overwrite, args.preproc))
+        work.append((vpath, out_path, args.overwrite, args.preproc,
+                     args.frame_interval))
 
     skipped = errors = done = 0
     pending_clips = []   # list of (N_i, 3, T, H, W) arrays

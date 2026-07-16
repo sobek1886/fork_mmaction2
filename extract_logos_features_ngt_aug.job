@@ -8,17 +8,29 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_logos_ngt_aug_%A.txt
 
+# NGT Flux-vs-Unreal ladder: the interval must make render_fps/interval = 15
+# (the ladder's common effective fps). CHECK THE RENDER FPS FIRST (count PNGs
+# in one sequence and divide by the matching real video's duration), then
+# submit with the env var, e.g.:
+#   sbatch --export=FRAME_INTERVAL=4 extract_logos_features_ngt_aug.job   # 60 fps renders
+#   sbatch --export=FRAME_INTERVAL=2 ...                                  # 30 fps renders
+#   sbatch --export=FRAME_INTERVAL=1 ...                                  # 15 fps renders
+# Output goes to a NEW _15fps dir so the original features (logos_features,
+# used by the old Table-5 runs) stay reproducible.
+
 module purge
 module load 2025
 
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
+: "${FRAME_INTERVAL:?Set FRAME_INTERVAL so render_fps/FRAME_INTERVAL = 15 (see header)}"
+
 srun python extract_logos_features_pngseq.py \
     --render_dir  /scratch-shared/psobecki/Custom_from_FBX/Saved/Renders \
-    --output_dir  /scratch-shared/psobecki/NGT_Aug/logos_features \
+    --output_dir  /scratch-shared/psobecki/NGT_Aug/logos_features_15fps \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dataset_name ngt_aug \
+    --frame_interval $FRAME_INTERVAL \
     --workers 5 \
-    --batch_size 8 \
-    --overwrite
+    --batch_size 8

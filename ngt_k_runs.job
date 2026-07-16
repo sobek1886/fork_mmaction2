@@ -44,14 +44,19 @@ YAML_ORIG="projects/retri/signclip_ngt/${EXPERIMENT}.yaml"
 USE_UNREAL_FLAG=${USE_UNREAL:+--use_unreal}
 
 # Flux-vs-Unreal ladder arms are evaluated on the shared take-list eval
-# manifest (FRONT-view primary readout, per-sentence ranks, length baseline);
-# legacy experiments keep the original 3-view pair manifest.
+# manifest (FRONT-view primary readout, per-sentence ranks, length baseline)
+# against the 15fps-effective Bushuis features; legacy experiments keep the
+# original 3-view pair manifest and 30fps-effective Bushuis features.
 case "$EXPERIMENT" in
-  ngt_sv_*|ngt_subset_*) EVAL_MANIFEST=/home/psobecki/ngt_sv_eval_manifest.json ;;
-  *)                     EVAL_MANIFEST=/home/psobecki/ngt_pair_manifest.json ;;
+  ngt_sv_*|ngt_subset_*)
+    EVAL_MANIFEST=/home/psobecki/ngt_sv_eval_manifest.json
+    BUSHUIS_DIR=/scratch-shared/psobecki/Bushuis/logos_features_15fps ;;
+  *)
+    EVAL_MANIFEST=/home/psobecki/ngt_pair_manifest.json
+    BUSHUIS_DIR=/scratch-shared/psobecki/Bushuis/logos_features ;;
 esac
 
-echo "Experiment : $EXPERIMENT  K=$K  eval manifest: $EVAL_MANIFEST"
+echo "Experiment : $EXPERIMENT  K=$K  eval manifest: $EVAL_MANIFEST  bushuis: $BUSHUIS_DIR"
 
 for i in $(seq 1 $K); do
     SEED=$((40 + i))
@@ -84,7 +89,7 @@ PYEOF
         --config      "$YAML_ORIG" \
         --checkpoint  "${RUN_DIR}/checkpoint_last.pt" \
         --manifest    "$EVAL_MANIFEST" \
-        --bushuis_dir /scratch-shared/psobecki/Bushuis/logos_features \
+        --bushuis_dir "$BUSHUIS_DIR" \
         --output_json "${RUN_DIR}/eval_results.json" \
         ${USE_UNREAL_FLAG}
 

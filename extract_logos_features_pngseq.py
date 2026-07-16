@@ -53,7 +53,7 @@ def _preprocess_worker(args):
         clips_np: (N, 3, CLIP_LEN, 224, 224) float32, or None on skip/error
         status:   'ok' | 'skip' | 'error: <msg>'
     """
-    seq_dir, out_path, overwrite = args
+    seq_dir, out_path, overwrite, frame_interval = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
@@ -113,7 +113,9 @@ def _preprocess_worker(args):
 
         processed = np.stack(processed)  # (T, 3, H, W)
 
-        effective_span = CLIP_LEN * FRAME_INTERVAL  # 64 frames
+        # Interval chosen so render_fps / frame_interval matches the target
+        # effective fps across all data sources (NGT ladder: 15).
+        effective_span = CLIP_LEN * frame_interval
 
         if T < effective_span:
             starts = [0]
@@ -126,7 +128,7 @@ def _preprocess_worker(args):
 
         clips = []
         for start in starts:
-            indices = [min(start + i * FRAME_INTERVAL, T - 1) for i in range(CLIP_LEN)]
+            indices = [min(start + i * frame_interval, T - 1) for i in range(CLIP_LEN)]
             clip = processed[indices]           # (CLIP_LEN, 3, H, W)
             clip = clip.transpose(1, 0, 2, 3)  # (3, CLIP_LEN, H, W)
             clips.append(clip)
@@ -207,6 +209,12 @@ def main():
                         help='Clips per GPU forward pass')
     parser.add_argument('--prefetch',     type=int, default=None,
                         help='Sequences to prefetch (default: workers * 8)')
+    parser.add_argument('--frame_interval', type=int, default=FRAME_INTERVAL,
+                        help='Sample every Nth frame (default 2). Choose so '
+                             'render_fps / frame_interval matches the target '
+                             'effective fps across all data sources — the NGT '
+                             'Flux-vs-Unreal ladder targets 15 fps effective '
+                             '(60 fps renders -> 4, 30 -> 2, 15 -> 1).')
     parser.add_argument('--overwrite',    action='store_true')
     args = parser.parse_args()
 
@@ -215,6 +223,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'CPU workers: {args.workers}  |  GPU batch: {args.batch_size}  |  Prefetch: {prefetch}')
+    print(f'Frame interval: {args.frame_interval}')
 
     print(f'Loading backbone from {args.checkpoint} ...')
     backbone = load_backbone(args.checkpoint, device)
@@ -231,7 +240,8 @@ def main():
     for seq_dir in seq_dirs:
         out_path = os.path.join(args.output_dir,
                                 f'{args.dataset_name}_{seq_dir.name}.npy')
-        work.append((str(seq_dir), out_path, args.overwrite))
+        work.append((str(seq_dir), out_path, args.overwrite,
+                     args.frame_interval))
 
     skipped = errors = done = 0
     pending_clips = []

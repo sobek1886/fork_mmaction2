@@ -14,6 +14,12 @@
 #   /scratch-shared/psobecki/NGT_flux/{date}/augmented_frames (see nano_banana
 #   rsync scripts). ALL FOUR session batches are needed (the experiment uses the
 #   full 4-signer train set).
+#
+# fps: the Flux frames are 15 fps (every 4th frame of the 60 fps sources), so
+# --frame_interval 1 gives the ladder's common effective 15 fps — matching the
+# real/Bushuis extractions at interval 4. Output goes to a _15fps dir; any
+# earlier flux features extracted at the default interval 2 (effective 7.5 fps)
+# are inconsistent and must NOT be mixed in.
 
 module purge
 module load 2025
@@ -27,8 +33,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 srun python extract_logos_features_ngt_flux.py \
     --flux_root   /scratch-shared/psobecki/NGT_flux \
-    --output_dir  /scratch-shared/psobecki/NGT_flux/logos_features \
+    --output_dir  /scratch-shared/psobecki/NGT_flux/logos_features_15fps \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dates       2025-11-26 2025-12-17 2026-01-29 2026-03-16 \
+    --frame_interval 1 \
     --workers 5 \
     --batch_size 16
