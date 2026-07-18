@@ -1,23 +1,34 @@
 #!/bin/bash
+# Extract frozen-LOGOS features for the regenerated ASL-Citizen Flux augments
+# (E4 augmented-vs-original geometry; spec: context/feature-reextraction-spec-2026-07-17.md §2.B).
+#
+# Frames: augmented_frames_512 — 6000 videos x 4 variants, 512px longest side,
+# generated at STRIDE 2 (every 2nd source frame stored) => --frame_interval 1
+# keeps temporal parity with originals extracted at --frame_interval 2 (both 15fps).
+# --preproc logos_native matches extract_logos_features_native_baseline.job exactly
+# (same preprocess_frame code path), so aug-vs-orig deltas carry no framing gap.
+# Output goes INTO logos_features_native next to the originals — E1/E2/E3 ignore
+# the *_variant files; analyze_augmentation_geometry.py pairs them by filename.
 
-#SBATCH --partition=gpu_mig
+#SBATCH --partition=gpu_a100
 #SBATCH --gpus=1
-#SBATCH --job-name=logos_asl_aug
+#SBATCH --job-name=logos_extract_aug512
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=16
 #SBATCH --time=24:00:00
-#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_logos_asl_aug_%A.txt
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
 
 module purge
 module load 2025
-
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
 srun python extract_logos_features_asl_citizen_aug.py \
-    --aug_dir    /scratch-shared/psobecki/ASL_Citizen/augmented_frames \
-    --output_dir /home/psobecki/ASL_Citizen/logos_features_endanchor \
-    --checkpoint $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
-    --workers 5 \
-    --batch_size 8
-#   --overwrite
+    --aug_dir     /scratch-shared/psobecki/ASL_Citizen/augmented_frames_512 \
+    --output_dir  /scratch-shared/psobecki/ASL_Citizen/logos_features_native \
+    --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
+    --preproc logos_native --frame_interval 1 \
+    --aug_names glasses shirt_1 signer_swap skin_mst_diffusion \
+    --workers 16 --batch_size 8
+
+echo "Done. Augment features in logos_features_native alongside the originals."

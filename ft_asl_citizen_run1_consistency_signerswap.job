@@ -29,7 +29,7 @@ LAMBDA_CONSIST=0.5
 
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
-AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames_512
 SPLITS=$HOME/ASL_Citizen/splits
 SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
 FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
@@ -38,7 +38,7 @@ LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLUR
 srun python train_logos_asl_citizen.py \
     --train_csv      $SPLITS/train.csv \
     --video_dir      $VIDEO_DIR \
-    --aug_frames_dir $AUG_FRAMES \
+    --aug_frames_dir $AUG_FRAMES --aug_frame_interval 1 \
     --aug_names      signer_swap \
     --checkpoint     $CKPT \
     --save_dir       $SAVE_DIR \

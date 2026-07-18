@@ -15,7 +15,7 @@
 #
 # NOTE: full unfreeze is activation-heavy, so the batch (hence #negatives) is small — the main
 # limit on this experiment. Raise BATCH if memory allows (more negatives = stronger contrastive);
-# if OOM, lower it. Preprocessing: direct224. CE is kept alongside SupCon for head/discriminability.
+# if OOM, lower it. Preprocessing: logos_native. CE is kept alongside SupCon for head/discriminability.
 
 # NOTE: must be gpu_h100 (94 GB). Full unfreeze costs ~3.4 GB of activations PER 32-frame clip;
 # the 40 GB A100 can't even fit batch 8 (needs ~48 GB). See probe_batch_size_capped.job.
@@ -57,7 +57,7 @@ EPOCHS=10
 
 CKPT=$HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth
 VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
-AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames
+AUG_FRAMES=/scratch-shared/psobecki/ASL_Citizen/augmented_frames_512
 SPLITS=$HOME/ASL_Citizen/splits
 SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
 FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
@@ -66,11 +66,11 @@ LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLUR
 srun python train_logos_asl_citizen.py \
     --train_csv      $SPLITS/train.csv \
     --video_dir      $VIDEO_DIR \
-    --aug_frames_dir $AUG_FRAMES \
+    --aug_frames_dir $AUG_FRAMES --aug_frame_interval 1 \
     --aug_names      glasses shirt_1 signer_swap skin_mst_diffusion \
     --checkpoint     $CKPT \
     --save_dir       $SAVE_DIR \
-    --orig_preproc direct224 --aug_preproc direct224 \
+    --orig_preproc logos_native --aug_preproc logos_native \
     --paired --gloss_balanced --per_gloss $PER_GLOSS --lambda_supcon $LAMBDA_SUPCON \
     --max_augs_per_item $MAXAUG \
     --unfreeze_blocks $UNFREEZE --llrd $LLRD --grad_checkpointing \
@@ -84,7 +84,7 @@ srun python extract_logos_features.py \
     --output_dir  $FEAT_DIR \
     --checkpoint  $SAVE_DIR/checkpoint_best.pt \
     --dataset_name asl_citizen \
-    --preproc direct224 --overwrite \
+    --preproc logos_native --overwrite \
     --workers 16 --batch_size 8
 
 echo "Done. Features in $FEAT_DIR — add 'run_full_glosscon' to eval_asl_citizen_features.job FEATS."

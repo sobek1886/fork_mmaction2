@@ -43,7 +43,7 @@ VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.webm'}
 
 
 def _preprocess_worker(args):
-    frame_dir, out_path, overwrite, frame_interval = args
+    frame_dir, out_path, overwrite, frame_interval, preproc = args
 
     if not overwrite and os.path.exists(out_path):
         return out_path, None, 'skip'
@@ -64,26 +64,10 @@ def _preprocess_worker(args):
         return out_path, None, f'error: {e}'
 
     try:
-        import cv2
-        processed = []
-        for frame in frames:
-            h, w = frame.shape[:2]
-            scale = RESIZE / min(h, w)
-            nh, nw = int(round(h * scale)), int(round(w * scale))
-            frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
-            pad_h = max(0, RESIZE - nh)
-            pad_w = max(0, RESIZE - nw)
-            frame = np.pad(frame,
-                           ((pad_h // 2, pad_h - pad_h // 2),
-                            (pad_w // 2, pad_w - pad_w // 2),
-                            (0, 0)),
-                           mode='constant')
-            y0 = (frame.shape[0] - INPUT_SIZE) // 2
-            x0 = (frame.shape[1] - INPUT_SIZE) // 2
-            frame = frame[y0:y0 + INPUT_SIZE, x0:x0 + INPUT_SIZE]
-            frame = (frame.astype(np.float32) - MEAN) / STD
-            processed.append(frame.transpose(2, 0, 1))
-
+        # Shared preprocessing with the originals extractor — geometry parity with
+        # extract_logos_features.py is required for augmented-vs-original deltas.
+        from extract_logos_features import preprocess_frame
+        processed = [preprocess_frame(frame, preproc) for frame in frames]
         processed = np.stack(processed)
         T = len(processed)
         effective_span = CLIP_LEN * frame_interval
@@ -142,7 +126,7 @@ def gpu_inference(backbone, clips_np, device, batch_size):
 
 
 def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_interval: int,
-                    aug_names=None):
+                    aug_names=None, preproc='logos_native'):
     """augmented_frames/{video_id}/{aug_name}/*.jpg → asl_citizen_{video_id}_{aug_name}.npy
 
     If aug_names is given, only those variant subdirs are extracted (the rest are skipped).
@@ -162,7 +146,7 @@ def build_work_list(aug_dir: Path, output_dir: Path, overwrite: bool, frame_inte
                 continue
             key = f'asl_citizen_{video_id}_{aug_name}'
             out_path = output_dir / f'{key}.npy'
-            work.append((str(aug_dir_entry), str(out_path), overwrite, frame_interval))
+            work.append((str(aug_dir_entry), str(out_path), overwrite, frame_interval, preproc))
     return work
 
 
@@ -182,6 +166,10 @@ def main():
     parser.add_argument('--aug_names', nargs='+', default=None,
                         help='Only extract these variant subdirs (default: all present). '
                              'e.g. --aug_names signer_swap skin_mst_diffusion')
+    parser.add_argument('--preproc', choices=['logos_native', 'direct224', 'letterbox224'],
+                        default='logos_native',
+                        help='Spatial preprocessing, shared with extract_logos_features.py. '
+                             'MUST match the mode used for the paired originals.')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
 
@@ -197,7 +185,7 @@ def main():
     backbone = load_backbone(args.checkpoint, device)
 
     work = build_work_list(aug_dir, output_dir, args.overwrite, args.frame_interval,
-                           args.aug_names)
+                           args.aug_names, args.preproc)
     print(f'Found {len(work)} augmented frame sequences to process')
 
     skipped = errors = done = 0
