@@ -4,7 +4,7 @@
 #SBATCH --job-name=ngt_k_runs
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=5
-#SBATCH --time=04:00:00
+#SBATCH --time=02:30:00
 #SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_ngt_k_runs_%x_%A.txt
 
 # Usage:
@@ -27,6 +27,16 @@
 #              ngt_subset_real ngt_subset_unreal_full ngt_subset_flux_full; do
 #     sbatch --job-name=$EXP --export=EXPERIMENT=$EXP ngt_k_runs.job
 #   done
+#
+# Real-signer-count ablation (fixed-data: 200 sentences x 1 take per condition;
+# prereq: make_ngt_singleview_manifest.py --sessions ... --suffix R{1..4}):
+#   for R in R1 R2 R3 R4; do for ARM in real unreal_full; do
+#     EXP=ngt_sv_${ARM}_${R}
+#     sbatch --job-name=$EXP --export=EXPERIMENT=$EXP ngt_k_runs.job
+#   done; done
+#
+# Seed-run count: default 3 (seeds 41-43, budget caution). Add the remaining
+# two seeds later without redoing 1-3 via --export=...,K=5,K_START=4.
 
 module purge
 module load 2025
@@ -37,7 +47,8 @@ source .venv/bin/activate
 export PYTHONPATH="$HOME/Fork_SignCLIP:$PYTHONPATH"
 export PATH="$MMPT_DIR/.venv/bin:$PATH"
 
-K=5
+K=${K:-3}
+K_START=${K_START:-1}
 EXPERIMENT=${EXPERIMENT:-ngt_baseline}
 BASE_DIR="/scratch-shared/psobecki/runs/retri_ngt"
 YAML_ORIG="projects/retri/signclip_ngt/${EXPERIMENT}.yaml"
@@ -58,7 +69,7 @@ esac
 
 echo "Experiment : $EXPERIMENT  K=$K  eval manifest: $EVAL_MANIFEST  bushuis: $BUSHUIS_DIR"
 
-for i in $(seq 1 $K); do
+for i in $(seq $K_START $K); do
     SEED=$((40 + i))
     RUN_DIR="${BASE_DIR}/${EXPERIMENT}_run${i}"
     YAML_TMP="/tmp/${EXPERIMENT}_run${i}_$$.yaml"

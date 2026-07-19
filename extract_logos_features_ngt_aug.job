@@ -17,6 +17,12 @@
 #   sbatch --export=FRAME_INTERVAL=1 ...                                  # 15 fps renders
 # Output goes to a NEW _15fps dir so the original features (logos_features,
 # used by the old Table-5 runs) stay reproducible.
+#
+# RENDER_DIR overridable: the original Custom_from_FBX/Saved/Renders tree was
+# purged (2026-07); the re-uploaded 15fps render copies (all 4 dates, palmer +
+# digits, flat <seq_dir>/*.png) land at /scratch-shared/psobecki/NGT_renders_15fps:
+#   sbatch --export=FRAME_INTERVAL=1,RENDER_DIR=/scratch-shared/psobecki/NGT_renders_15fps \
+#       extract_logos_features_ngt_aug.job
 
 module purge
 module load 2025
@@ -26,8 +32,10 @@ source .venv/bin/activate
 
 : "${FRAME_INTERVAL:?Set FRAME_INTERVAL so render_fps/FRAME_INTERVAL = 15 (see header)}"
 
+RENDER_DIR=${RENDER_DIR:-/scratch-shared/psobecki/Custom_from_FBX/Saved/Renders}
+
 srun python extract_logos_features_pngseq.py \
-    --render_dir  /scratch-shared/psobecki/Custom_from_FBX/Saved/Renders \
+    --render_dir  "$RENDER_DIR" \
     --output_dir  /scratch-shared/psobecki/NGT_Aug/logos_features_15fps \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dataset_name ngt_aug \
