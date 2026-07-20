@@ -14,8 +14,15 @@
 # features (logos_features, used by the old Table-5 runs) stay reproducible.
 # Input: NGT_dataset/train, rsynced from the workstation's Data/ngt_train_set
 # (720x720, already square-cropped — no crop step needed). Videos are searched
-# recursively, so the per-session date subfolders are fine; extra views
-# (LEFT/MIDDLE files) staged into the same tree are picked up automatically.
+# recursively, so the per-session date subfolders are fine, and .mkv is
+# accepted alongside .mp4.
+#
+# VIEW RUNS (2026-07-20): the side cameras arrived as separate trees, ALSO
+# 720x720 60fps, so the same job extracts them into the same output dir —
+# run once per tree (front tree first, AFTER its RIGHT→MIDDLE rename):
+#   sbatch extract_logos_features_piotranims.job                # train (MIDDLE)
+#   sbatch --export=VIDEO_DIR=/scratch-shared/psobecki/NGT_dataset/ngt_train_right ...
+#   sbatch --export=VIDEO_DIR=/scratch-shared/psobecki/NGT_dataset/ngt_train_left  ...
 
 module purge
 module load 2025
@@ -23,8 +30,10 @@ module load 2025
 cd $HOME/fork_mmaction2
 source .venv/bin/activate
 
+VIDEO_DIR=${VIDEO_DIR:-/scratch-shared/psobecki/NGT_dataset/train}
+
 srun python extract_logos_features.py \
-    --video_dir   /scratch-shared/psobecki/NGT_dataset/train \
+    --video_dir   "$VIDEO_DIR" \
     --output_dir  /scratch-shared/psobecki/piotrAnims/logos_features_15fps \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dataset_name piotr_anims \

@@ -4,25 +4,34 @@
 #SBATCH --gpus=1
 #SBATCH --job-name=logos_ngt_aug
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=9
 #SBATCH --time=24:00:00
 #SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_logos_ngt_aug_%A.txt
 
-# NGT Flux-vs-Unreal ladder: the interval must make render_fps/interval = 15
-# (the ladder's common effective fps). CHECK THE RENDER FPS FIRST (count PNGs
-# in one sequence and divide by the matching real video's duration), then
-# submit with the env var, e.g.:
-#   sbatch --export=FRAME_INTERVAL=4 extract_logos_features_ngt_aug.job   # 60 fps renders
-#   sbatch --export=FRAME_INTERVAL=2 ...                                  # 30 fps renders
-#   sbatch --export=FRAME_INTERVAL=1 ...                                  # 15 fps renders
-# Output goes to a NEW _15fps dir so the original features (logos_features,
-# used by the old Table-5 runs) stay reproducible.
+# NGT Flux-vs-Unreal ladder: Unreal render feature extraction, TMPDIR mode.
 #
-# RENDER_DIR overridable: the original Custom_from_FBX/Saved/Renders tree was
-# purged (2026-07); the re-uploaded 15fps render copies (all 4 dates, palmer +
-# digits, flat <seq_dir>/*.png) land at /scratch-shared/psobecki/NGT_renders_15fps:
-#   sbatch --export=FRAME_INTERVAL=1,RENDER_DIR=/scratch-shared/psobecki/NGT_renders_15fps \
-#       extract_logos_features_ngt_aug.job
+# The 2026-07 re-uploaded renders live as TWO tars on /scratch-shared
+# (~25 GB each; PNG trees would cost ~1.6 M inodes, which blew the scratch
+# inode quota on 2026-07-20). This job therefore NEVER extracts them to the
+# shared filesystem: it untars both to the node-local NVMe ($TMPDIR), runs
+# the unchanged pngseq extractor there, and writes only the .npy features
+# (1 file per sequence, ~7,878 total) back to /scratch-shared.
+#
+# Tar layout (note the inconsistent case of the digits tar name):
+#   /scratch-shared/psobecki/renders_digits.tar  -> Renders_Digits/{seq}/NNNN.png
+#   /scratch-shared/psobecki/Renders_Palmer.tar  -> Renders_Palmer/{seq}/NNNN.png
+# Sequence dirs: {char}_{sent}_{sess}_{take}_{left|middle|right}
+#   e.g. digits_M20241106_6027_251217_5_middle
+# (view-labeled cameras; the old purged renders used cam2/3/4 — the manifest
+# builder was updated for this on 2026-07-20).
+#
+# FRAME_INTERVAL must make render_fps/FRAME_INTERVAL = 15 (the ladder's
+# common effective fps). The renders were produced at 15 fps -> interval 1;
+# the preflight below prints observed frames/duration ratios against the
+# matching real videos so a wrong assumption is visible in the log before
+# any GPU time is spent (ratios <= 15 are expected: renders cover only the
+# mocap span, real recordings include lead-in/out).
+#   sbatch --export=FRAME_INTERVAL=1 extract_logos_features_ngt_aug.job
 
 module purge
 module load 2025
@@ -32,13 +41,51 @@ source .venv/bin/activate
 
 : "${FRAME_INTERVAL:?Set FRAME_INTERVAL so render_fps/FRAME_INTERVAL = 15 (see header)}"
 
-RENDER_DIR=${RENDER_DIR:-/scratch-shared/psobecki/Custom_from_FBX/Saved/Renders}
+SCRATCH=/scratch-shared/psobecki
+STAGE=$TMPDIR/renders
+mkdir -p "$STAGE"
+echo "===== TMPDIR ====="; df -h "$TMPDIR"
 
-srun python extract_logos_features_pngseq.py \
-    --render_dir  "$RENDER_DIR" \
-    --output_dir  /scratch-shared/psobecki/NGT_Aug/logos_features_15fps \
-    --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
-    --dataset_name ngt_aug \
-    --frame_interval $FRAME_INTERVAL \
-    --workers 5 \
-    --batch_size 8
+for t in "$SCRATCH/renders_digits.tar" "$SCRATCH/Renders_Palmer.tar"; do
+    echo "Untarring $t ..."; time tar -xf "$t" -C "$STAGE"
+done
+echo "Staged sequence dirs: $(ls -d $STAGE/*/*/ | wc -l)"
+
+# Preflight: PNG count vs matching real video duration (sample of 40 seqs).
+python - <<'EOF'
+import glob, os, subprocess
+import cv2
+stage = os.environ['TMPDIR'] + '/renders'
+real_root = '/scratch-shared/psobecki/NGT_dataset/train'
+seqs = sorted(glob.glob(stage + '/Renders_Digits/*_middle'))[::max(1, len(glob.glob(stage + '/Renders_Digits/*_middle'))//40)]
+ratios = []
+for s in seqs:
+    parts = os.path.basename(s).split('_')          # digits_Mxxx_nnnn_sess_take_middle
+    sent, sess, take = '_'.join(parts[1:3]), parts[3], parts[4]
+    hits = glob.glob(f'{real_root}/*/{sent}_{sess}_{take}_*.mp4')
+    if not hits:
+        continue
+    cap = cv2.VideoCapture(hits[0])
+    dur = cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 60)
+    n = len(glob.glob(s + '/*.png'))
+    if dur > 0 and n > 0:
+        ratios.append(n / dur)
+ratios.sort()
+if ratios:
+    print(f'PREFLIGHT fps estimate over {len(ratios)} seqs: '
+          f'min {ratios[0]:.1f}  median {ratios[len(ratios)//2]:.1f}  max {ratios[-1]:.1f} '
+          f'(expect max ~= render fps; <= due to mocap-span trimming)')
+else:
+    print('PREFLIGHT: no matching real videos found — check naming/rename state')
+EOF
+
+for char_dir in Renders_Digits Renders_Palmer; do
+    srun python extract_logos_features_pngseq.py \
+        --render_dir  "$STAGE/$char_dir" \
+        --output_dir  $SCRATCH/NGT_Aug/logos_features_15fps \
+        --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
+        --dataset_name ngt_aug \
+        --frame_interval $FRAME_INTERVAL \
+        --workers 8 \
+        --batch_size 8
+done
