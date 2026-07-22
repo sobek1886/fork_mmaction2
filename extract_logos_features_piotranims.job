@@ -38,5 +38,5 @@ srun python extract_logos_features.py \
     --checkpoint  $HOME/fork_mmaction2/data/model/logos_autsl_wlasl_model.pth \
     --dataset_name piotr_anims \
     --frame_interval 4 \
-    --workers 5 \
+    --workers "${WORKERS:-5}" --prefetch "${PREFETCH:-40}" \
     --batch_size 8
