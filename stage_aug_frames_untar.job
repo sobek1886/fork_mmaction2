@@ -1,0 +1,57 @@
+#!/bin/bash
+# Extract the per-parent augmented-frame TARs back into the directory tree that
+# train_logos_asl_citizen.py's ClipDataset expects:  {aug_frames_dir}/{video_id}/{aug}/*.jpg
+#
+# WHY THIS EXISTS
+#   /scratch-shared/psobecki/ASL_Citizen/augmented_frames_512 is a symlink to
+#   .../flux_asl512/output/asl512/asl512/augmented_frames, which on 2026-07-20 was
+#   repacked into 6,000 per-parent .tar archives. ClipDataset resolves an aug row via
+#       fdir = Path(aug_frames_dir)/video_id/aug ;  if not fdir.is_dir(): missing += 1
+#   so with tars every augmented row is SILENTLY DROPPED. (Confirmed: job 24985152
+#   logs "64154 -> 40154 items (24000 unresolved)", i.e. the running full-size "aug"
+#   arm is training on originals only. The last good run, 24730895 on 2026-07-18,
+#   logged "64154 items (0 unresolved)".)
+#
+#   This job restores an extracted tree at a NEW path so nothing currently running is
+#   touched. Both the sub450 aug arm and any re-run of the full aug arm can point at it.
+#
+# NOTE: parent names contain SPACES ("...-THINK PENETRATE.tar") -> NUL-delimited only.
+
+#SBATCH --partition=staging
+#SBATCH --job-name=untar_aug512
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=32
+#SBATCH --time=08:00:00
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+set -u
+SRC=/scratch-shared/psobecki/ASL_Citizen/augmented_frames_512          # dir of *.tar
+DEST=/scratch-shared/psobecki/ASL_Citizen/augmented_frames_512_x       # extracted tree
+AUGS="glasses shirt_1 signer_swap skin_mst_diffusion"
+
+mkdir -p "$DEST"
+echo "SRC=$SRC"
+echo "DEST=$DEST"
+echo "tars: $(find "$SRC" -maxdepth 1 -name '*.tar' | wc -l)"
+date
+
+# 16-way parallel extraction, NUL-delimited (names contain spaces).
+find "$SRC" -maxdepth 1 -name '*.tar' -print0 \
+  | xargs -0 -P 16 -n 1 -I{} tar -xf "{}" -C "$DEST"
+RC=$?
+date
+echo "xargs rc=$RC"
+
+echo "===== verification ====="
+NPAR=$(find "$DEST" -mindepth 1 -maxdepth 1 -type d | wc -l)
+echo "parent dirs: $NPAR   (expect 6000)"
+for a in $AUGS; do
+    echo "  $a dirs: $(find "$DEST" -mindepth 2 -maxdepth 2 -type d -name "$a" | wc -l)   (expect 6000)"
+done
+NLEAF=$(find "$DEST" -mindepth 2 -maxdepth 2 -type d | wc -l)
+echo "leaf aug dirs: $NLEAF   (expect 24000)"
+NEMPTY=$(find "$DEST" -mindepth 2 -maxdepth 2 -type d -empty | wc -l)
+echo "EMPTY leaf dirs: $NEMPTY   (expect 0)"
+echo "total jpgs: $(find "$DEST" -name '*.jpg' | wc -l)"
+du -sh "$DEST"
+echo "Done."

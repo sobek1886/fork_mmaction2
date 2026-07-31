@@ -1,0 +1,104 @@
+#!/bin/bash
+# FROM-SCRATCH baseline (CE only): train MViTv2-S on ASL-Citizen with RANDOM INIT
+# (NO Logos checkpoint). Purpose: test whether the Logos-pretrained baseline
+# (run2 CE = 85.57 test / run3 aug = 85.59, aug ~0 gain) is SATURATED — i.e. a
+# weaker from-scratch model should score well below 85%, showing pretraining, not
+# saturation of the recipe, is why augmentation cannot help.
+#
+# HOW RANDOM INIT IS DONE WITHOUT EDITING THE SHARED train_logos_asl_citizen.py:
+#   train_logos_asl_citizen.py loads --checkpoint with load_state_dict(strict=False),
+#   keeping only keys prefixed "backbone.". A checkpoint whose state_dict has NO
+#   "backbone.*" keys therefore loads NOTHING -> the MViT built by MODELS.build stays
+#   at its (PyTorch-default) random init. We synthesise that empty checkpoint below.
+#   >>> OPEN CAVEAT (see scratch-baseline-prep.md): MODELS.build() does NOT call
+#       backbone.init_weights(), so weights are torch defaults, not MViT's intended
+#       trunc_normal init. Trainable, but not the canonical from-scratch init. The
+#       cleaner alternative is a 3-line --random_init flag patch (documented in the
+#       artifact) that calls backbone.init_weights(). Left as Piotr's choice.
+#
+# From-scratch REQUIRES a full-network unfreeze (UNFREEZE=16); leaving randomly
+# initialised blocks frozen would be meaningless. Full unfreeze => batch 6 / accum 4
+# (the script's own full-FT note; full-unfreeze historically needed H100 on A100-40GB).
+#
+# NOT SUBMITTED — prepared only, gated on Piotr's SBU request. Do not sbatch.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=scratch_asl_ce
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=48:00:00              # ~30 GPU-h expected (30 ep full-unfreeze + extract);
+                                     # gpu_a100 max is 5 days, so this has headroom.
+                                     # Reduced (SUBSET=half) needs only ~16h.
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+# ── run config ───────────────────────────────────────────────────────────────
+TAG=scratch_ce
+UNFREEZE=16          # full network (NUM_BLOCKS=16) — mandatory for random init
+LR=1e-3              # SAME-LR baseline (matches run2/run3 template).
+                     # OPEN LR QUESTION (see artifact): from-scratch may prefer a
+                     # different LR. Prepared alternatives — pick ONE, do not guess:
+                     #   ALT-A (safer, 10x lower):  LR=1e-4
+                     #   ALT-B (literal 10x higher, likely unstable): LR=1e-2
+LLRD=1.0             # uniform LR (no layer-wise decay — nothing pretrained to protect)
+BATCH=6              # full-unfreeze memory cap (A100-40GB)
+GRAD_ACCUM=4         # effective batch 24
+EPOCHS=30            # from-scratch needs FAR more than the 10-epoch FT template.
+                     # 30 = defensible minimum; 50 = thorough. Cost scales linearly
+                     # (~1 GPU-h/epoch, decode-bound) — see cost table in artifact.
+
+# ── reduced-set toggle (50% stratified train subset) ─────────────────────────
+# Set SUBSET=half to train on splits_half/train.csv (built by
+# make_asl_citizen_train_subset.py). Leave empty for the full 40,154-video train.
+SUBSET=""            # "" = full train ; "half" = 50% stratified subset
+if [ "$SUBSET" = "half" ]; then
+    SPLITS=$HOME/ASL_Citizen/splits_half
+    TAG=${TAG}_half
+    EPOCHS=30        # keep epochs; half the data => ~half GPU-h/epoch
+else
+    SPLITS=$HOME/ASL_Citizen/splits
+fi
+
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+
+# ── synthesise the empty (backbone-key-less) checkpoint for random init ───────
+EMPTY_CKPT=$HOME/fork_mmaction2/data/model/EMPTY_random_init.pth
+if [ ! -f "$EMPTY_CKPT" ]; then
+    python -c "import torch, os; os.makedirs(os.path.dirname('$EMPTY_CKPT'), exist_ok=True); torch.save({'state_dict': {}}, '$EMPTY_CKPT')"
+    echo "[random-init] wrote empty checkpoint $EMPTY_CKPT (loads no weights)"
+fi
+
+# ── train (random init: no Logos weights loaded) ─────────────────────────────
+srun python train_logos_asl_citizen.py \
+    --train_csv  $SPLITS/train.csv \
+    --video_dir  $VIDEO_DIR \
+    --checkpoint $EMPTY_CKPT \
+    --save_dir   $SAVE_DIR \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $HOME/ASL_Citizen/splits/val.csv
+
+# ── re-extract all videos with the from-scratch checkpoint (Eval A + Eval B) ─
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc logos_native --overwrite \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — now run eval_asl_citizen_features.job (MMPT venv, genoa)."
+
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true

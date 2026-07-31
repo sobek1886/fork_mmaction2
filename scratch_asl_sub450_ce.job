@@ -1,0 +1,111 @@
+#!/bin/bash
+# FROM-SCRATCH, AUGMENTED-SUBSET arm CE-sub: train MViTv2-S with RANDOM INIT on the
+# 6,000 ASL-Citizen train originals that HAVE Flux augmentations. 450-way task.
+#
+# WHY: in the full-set aug experiment only 6,000 / 40,154 originals (15%) carry augs,
+# so any aug effect is diluted across 2,731 glosses. Here the SAME 6,000 parents are
+# the entire training set, so the paired arm (scratch_asl_sub450_aug.job) has 100%
+# augmentation coverage. CE-sub is its no-aug control. Tests whether the full-set
+# aug null is a coverage-dilution artifact.
+#
+# The 6,000 parents cover exactly 450 of the 2,731 glosses at 5-18 parents/gloss
+# (median 14) vs the full set's 9-24 (median 15) -> per-gloss density is matched;
+# the TASK SIZE is not (450-way vs 2,731-way). That confound is acknowledged.
+#
+# Random-init mechanism (empty backbone-key-less checkpoint) is unchanged from
+# scratch_asl_citizen_ce.job -- see that file's header and scratch-baseline-prep.md.
+#
+# LABEL SPACE (450-way):
+#   train_logos_asl_citizen.py builds gloss_to_idx = sorted(set(glosses)) from
+#   args.train_csv.replace("splits_aug","splits"). For this arm that is this file's
+#   own train.csv -> 450 glosses, indices 0..449. The head width is a SEPARATE flag
+#   (--num_classes, default 2731) and MUST be passed as 450, which it is below.
+#   ClipDataset drops rows whose gloss is outside gloss_to_idx, and val.csv/test.csv
+#   in splits_sub450/ are already filtered to the same 450 glosses.
+
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=sub450_ce
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=10:00:00              # est. 6.8 GPU-h (20 ep x 6,000 clips = 4.1 h at the
+                                     # MEASURED 0.124 s/clip of job 24985151, + 2.7 h
+                                     # full-dataset feature extract). Limit also caps
+                                     # spend at 1,280 SBU.
+#SBATCH --output=/home/psobecki/fork_mmaction2/jobs/output/slurm_%x_%A.txt
+
+module purge
+module load 2025
+cd $HOME/fork_mmaction2
+source .venv/bin/activate
+export PYTHONUNBUFFERED=1
+
+# ── run config (identical to scratch_asl_citizen_ce.job EXCEPT epochs, see note) ──
+TAG=sub450_ce
+UNFREEZE=16          # full network — mandatory for random init
+LR=1e-3              # SAME as the full-size template
+LLRD=1.0
+BATCH=6
+GRAD_ACCUM=4         # effective batch 24
+EPOCHS=20            # DEVIATION from the template's 30. The full-size runs measured
+                     # 0.124 s/clip (5,220 opt-steps in 4:18:35, job 24985151), ~1.5x
+                     # slower than the 0.9 GPU-h/epoch the prep artifact assumed. At 30
+                     # epochs the CE-sub + AUG-sub pair costs ~5,490 SBU, over the 4,500
+                     # hard cap. 20 epochs keeps the pair at ~3,850 SBU. BOTH sub450 arms
+                     # use 20, so the CE-sub vs AUG-sub contrast (the primary one) stays
+                     # exactly matched; only the sub-vs-full epoch count differs.
+NUM_CLASSES=450      # 450-way head — the subset covers 450 of the 2,731 glosses
+
+SPLITS=$HOME/ASL_Citizen/splits_sub450
+
+VIDEO_DIR=/scratch-shared/psobecki/ASL_Citizen/videos
+SAVE_DIR=/scratch-shared/psobecki/runs/asl_ft_${TAG}
+FEAT_DIR=/scratch-shared/psobecki/ASL_Citizen/logos_features_${TAG}
+LOGFILE=/home/psobecki/fork_mmaction2/jobs/output/slurm_${SLURM_JOB_NAME}_${SLURM_JOB_ID}.txt
+
+# ── pre-flight: splits must be the expected size / gloss space ───────────────
+for f in train val test; do
+    [ -f "$SPLITS/$f.csv" ] || { echo "FATAL: missing $SPLITS/$f.csv"; exit 1; }
+done
+NTRAIN=$(($(wc -l < $SPLITS/train.csv) - 1))
+NGLOSS=$(tail -n +2 $SPLITS/train.csv | cut -d, -f3 | sort -u | wc -l)
+echo "[pre-flight] train rows=$NTRAIN (expect 6000)  glosses=$NGLOSS (expect 450)"
+[ "$NTRAIN" -eq 6000 ] || { echo "FATAL: train.csv is $NTRAIN rows, expected 6000"; exit 1; }
+[ "$NGLOSS" -eq 450 ]  || { echo "FATAL: train.csv has $NGLOSS glosses, expected 450"; exit 1; }
+
+# ── synthesise the empty (backbone-key-less) checkpoint for random init ───────
+EMPTY_CKPT=$HOME/fork_mmaction2/data/model/EMPTY_random_init.pth
+if [ ! -f "$EMPTY_CKPT" ]; then
+    python -c "import torch, os; os.makedirs(os.path.dirname('$EMPTY_CKPT'), exist_ok=True); torch.save({'state_dict': {}}, '$EMPTY_CKPT')"
+    echo "[random-init] wrote empty checkpoint $EMPTY_CKPT (loads no weights)"
+fi
+
+# ── train (random init, 6,000 parent originals, 450-way) ─────────────────────
+srun python train_logos_asl_citizen.py \
+    --train_csv  $SPLITS/train.csv \
+    --video_dir  $VIDEO_DIR \
+    --checkpoint $EMPTY_CKPT \
+    --save_dir   $SAVE_DIR \
+    --num_classes $NUM_CLASSES \
+    --unfreeze_blocks $UNFREEZE --llrd $LLRD \
+    --epochs $EPOCHS --batch_size $BATCH --grad_accum $GRAD_ACCUM --lr $LR \
+    --workers 16 \
+    --mlflow --mlflow_run_name asl_ft_${TAG} --slurm_log "$LOGFILE" \
+    --val_csv $SPLITS/val.csv
+
+# ── re-extract all videos with the from-scratch checkpoint (Eval A + Eval B) ─
+# Kept identical to the full-size templates (all 83,399 videos) so the feature dirs
+# stay comparable with every other run. Eval must use splits_sub450/test.csv.
+srun python extract_logos_features.py \
+    --video_dir   $VIDEO_DIR \
+    --output_dir  $FEAT_DIR \
+    --checkpoint  $SAVE_DIR/checkpoint_best.pt \
+    --dataset_name asl_citizen \
+    --preproc logos_native --overwrite \
+    --workers 16 --batch_size 8
+
+echo "Done. Features in $FEAT_DIR — eval with eval_asl_citizen_features.job (MMPT venv, genoa),"
+echo "pointed at $SPLITS/test.csv (450-gloss subset), NOT the full test split."
+
+RUNID=$(cat $SAVE_DIR/mlflow_run_id.txt 2>/dev/null)
+[ -n "$RUNID" ] && python mlflow_log_slurm_log.py "$RUNID" "$LOGFILE" || true
